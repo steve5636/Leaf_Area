@@ -27,3 +27,7 @@ outputs/
 # SAM3 repo는 포함
 !sam3/
 !sam3/**
+
+# test_image 포함
+!test_image/
+!test_image/**
