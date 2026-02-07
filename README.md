@@ -22,8 +22,11 @@ SAM3 모델 가중치는 Hugging Face 저장소에서 내려받습니다(접근 
 ### 설치 (공통)
 ```bash
 pip install -e ./sam3
+pip install -U "huggingface_hub[cli]"
 hf auth login
 ```
+> 처음 SAM3 기능을 실행할 때 가중치가 자동으로 다운로드됩니다.
+> (Hugging Face 승인 + 로그인 필요)
 
 ### macOS MPS (권장)
 ```bash
