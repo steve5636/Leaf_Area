@@ -1,0 +1,12 @@
+numpy
+opencv-python
+scipy
+scikit-image
+Pillow
+networkx
+customtkinter
+torch
+torchvision
+huggingface_hub
+einops
+pycocotools

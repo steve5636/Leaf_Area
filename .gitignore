@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+.DS_Store
+.cursor/
+.vscode/
+.venv/
+.mamba/
+.env
+
+# Local assets & outputs
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.gif
+*.webp
+*.mp4
+*.mov
+*.avi
+
+# Export outputs
+exports/
+output/
+outputs/
+
+# SAM3 repo (download separately)
+sam3/
