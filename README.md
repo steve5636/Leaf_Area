@@ -2,10 +2,10 @@
 
 잎 면적 분석 및 SAM3 기반 혼합 분석 GUI.
 
-## 1) 설치
+## 1) 설치 (conda)
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+conda create -n leaf_area python=3.12 -y
+conda activate leaf_area
 pip install -r requirements.txt
 ```
 
