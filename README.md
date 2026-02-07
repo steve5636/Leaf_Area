@@ -15,20 +15,22 @@ python main.py
 ```
 
 ## 3) SAM3 사용 (선택)
-SAM3 모델 가중치는 Hugging Face 저장소에서 내려받습니다. 접근 권한이 필요합니다.  
+이 레포에는 `sam3/` 소스가 포함되어 있습니다.  
+SAM3 모델 가중치는 Hugging Face 저장소에서 내려받습니다(접근 권한 필요).  
 가중치 저장소: https://huggingface.co/facebook/sam3
 
-### 설치 가이드 (macOS MPS)
-`docs/sam3_mps_setup.md` 참고.
-
-### 요약
+### 설치 (공통)
 ```bash
-# SAM3 레포 (PR #173 브랜치) 설치
-./scripts/setup_sam3_mps.sh
-
-# Hugging Face 로그인
+pip install -e ./sam3
 hf auth login
 ```
+
+### macOS MPS (권장)
+```bash
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+```
+
+설치 가이드는 `docs/sam3_mps_setup.md` 참고.
 
 ## 4) 리사이즈 추론
 UI의 `추론 리사이즈 배율`에 숫자를 입력하면,  

@@ -15,10 +15,14 @@ if [ ! -d "${SAM3_DIR}" ]; then
   git clone https://github.com/facebookresearch/sam3.git "${SAM3_DIR}"
 fi
 
-echo "PR #173 브랜치 체크아웃..."
 cd "${SAM3_DIR}"
-git fetch origin pull/173/head:device-agnostic
-git checkout device-agnostic
+if [ -d "${SAM3_DIR}/.git" ]; then
+  echo "PR #173 브랜치 체크아웃..."
+  git fetch origin pull/173/head:device-agnostic
+  git checkout device-agnostic
+else
+  echo "sam3/.git이 없어 PR #173 체크아웃을 건너뜁니다."
+fi
 
 echo "가상환경 확인..."
 ENV_EXISTS="$(mamba env list --json | python - <<'PY'
