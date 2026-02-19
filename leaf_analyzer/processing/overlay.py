@@ -5,6 +5,7 @@ Overlay Manager for Advanced Leaf Analyzer
 오버레이 및 시각화 생성
 """
 
+import os
 import cv2
 import numpy as np
 from typing import Optional, Set, List, Union
@@ -17,6 +18,37 @@ class OverlayManager:
     def _draw_count_label(self, image_rgb: np.ndarray, text: str) -> np.ndarray:
         """좌상단 카운트 텍스트 렌더링 (공통)"""
         return self._draw_text_block(image_rgb, [text])
+
+    def _current_image_name(self) -> str:
+        """현재 이미지 파일명 반환."""
+        try:
+            p = str(getattr(self, "current_image_path", "") or "").strip()
+            return os.path.basename(p) if p else ""
+        except Exception:
+            return ""
+
+    def _build_overlay_lines(
+        self,
+        num_leaves: int,
+        num_scale: int,
+        stats: Optional[dict] = None,
+        suffix: str = "",
+    ) -> List[str]:
+        """오버레이 상단 텍스트 라인 구성."""
+        lines: List[str] = []
+        image_name = self._current_image_name()
+        if image_name:
+            lines.append(f"Image: {image_name}")
+        head = f"Leaves: {int(num_leaves)}, Scale: {int(num_scale)}"
+        if suffix:
+            head += f" {suffix}"
+        lines.append(head)
+        if stats is not None:
+            del_leaf = int(stats.get("deleted_leaf_count", 0))
+            del_scale = int(stats.get("deleted_scale_count", 0))
+            if del_leaf > 0 or del_scale > 0:
+                lines.append(f"Deleted: Leaf {del_leaf}, Scale {del_scale}")
+        return lines
     
     def _get_contour_thickness(self, extra: int = 1) -> int:
         """윤곽선 두께를 기본값보다 약간 두껍게 반환."""
@@ -25,6 +57,55 @@ class OverlayManager:
         except Exception:
             base = 1
         return int(max(1, base + int(extra)))
+
+    def _draw_dashed_contours(
+        self,
+        image_rgb: np.ndarray,
+        contours,
+        color: tuple[int, int, int],
+        thickness: int = 1,
+        dash_length: int = 7,
+        gap_length: int = 10,
+    ) -> np.ndarray:
+        """컨투어를 점선으로 렌더링."""
+        if contours is None:
+            return image_rgb
+        thick = int(max(1, thickness))
+        dash = int(max(1, dash_length))
+        gap = int(max(1, gap_length))
+        step = float(dash + gap)
+        try:
+            for contour in contours:
+                if contour is None:
+                    continue
+                pts = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
+                if pts.shape[0] < 2:
+                    continue
+                closed_pts = np.vstack([pts, pts[0]])
+                for idx in range(pts.shape[0]):
+                    p1 = closed_pts[idx]
+                    p2 = closed_pts[idx + 1]
+                    vec = p2 - p1
+                    seg_len = float(np.linalg.norm(vec))
+                    if seg_len < 1e-6:
+                        continue
+                    direction = vec / seg_len
+                    t = 0.0
+                    while t < seg_len:
+                        t_end = min(t + float(dash), seg_len)
+                        s = p1 + direction * t
+                        e = p1 + direction * t_end
+                        cv2.line(
+                            image_rgb,
+                            (int(round(s[0])), int(round(s[1]))),
+                            (int(round(e[0])), int(round(e[1]))),
+                            color,
+                            thick,
+                        )
+                        t += step
+        except Exception:
+            return image_rgb
+        return image_rgb
 
     def _build_rainbow_palette(self, num_colors: int = 72) -> List[tuple[int, int, int]]:
         """Leaf용 레인보우 팔레트 (RGB). 세션 단위로 랜덤 셔플."""
@@ -139,7 +220,12 @@ class OverlayManager:
                         outline_color = (255, 255, 255)
                         if palette_type == 'leaf':
                             outline_color = tuple(int(v) for v in color)
-                        cv2.drawContours(overlay, cnts, -1, outline_color, contour_thickness)
+                        if palette_type == 'scale':
+                            overlay = self._draw_dashed_contours(
+                                overlay, cnts, outline_color, contour_thickness
+                            )
+                        else:
+                            cv2.drawContours(overlay, cnts, -1, outline_color, contour_thickness)
                 except Exception:
                     pass
             return overlay.clip(0, 255).astype(np.uint8)
@@ -189,7 +275,12 @@ class OverlayManager:
                         outline_color = (255, 255, 255)
                         if palette_type == 'leaf':
                             outline_color = tuple(int(v) for v in color)
-                        cv2.drawContours(img, cnts, -1, outline_color, int(max(1, thick)))
+                        if palette_type == 'scale':
+                            img = self._draw_dashed_contours(
+                                img, cnts, outline_color, int(max(1, thick))
+                            )
+                        else:
+                            cv2.drawContours(img, cnts, -1, outline_color, int(max(1, thick)))
                 except Exception:
                     pass
             return img.clip(0, 255).astype(np.uint8)
@@ -205,7 +296,7 @@ class OverlayManager:
         }
         
         for seed_class, color in colors.items():
-            for x, y in self.seed_manager.seeds[seed_class]:
+            for x, y in self.seed_manager.seeds.get(seed_class, []):
                 # 원본 좌표를 표시 좌표로 변환
                 display_x = int(x * self.display_scale)
                 display_y = int(y * self.display_scale)
@@ -270,11 +361,7 @@ class OverlayManager:
             )
         num_leaves = int(stats.get("active_leaf_count", 0))
         num_scales = int(stats.get("active_scale_count", 0))
-        lines = [f"Leaves: {num_leaves}, Scales: {num_scales} (Preview)"]
-        del_leaf = int(stats.get("deleted_leaf_count", 0))
-        del_scale = int(stats.get("deleted_scale_count", 0))
-        if del_leaf > 0 or del_scale > 0:
-            lines.append(f"Deleted: Leaf {del_leaf}, Scale {del_scale}")
+        lines = self._build_overlay_lines(num_leaves, num_scales, stats=stats, suffix="(Preview)")
         preview_img = self._draw_text_block(preview_img, lines)
     
         # 삭제된 객체 X 표시 (Leaf/Scale)
@@ -400,11 +487,7 @@ class OverlayManager:
             )
         num_leaves = int(stats.get("active_leaf_count", 0))
         num_scales = int(stats.get("active_scale_count", 0))
-        lines = [f"Leaves: {num_leaves}, Scales: {num_scales} (Preview)"]
-        del_leaf = int(stats.get("deleted_leaf_count", 0))
-        del_scale = int(stats.get("deleted_scale_count", 0))
-        if del_leaf > 0 or del_scale > 0:
-            lines.append(f"Deleted: Leaf {del_leaf}, Scale {del_scale}")
+        lines = self._build_overlay_lines(num_leaves, num_scales, stats=stats, suffix="(Preview)")
         overlay = self._draw_text_block(overlay, lines)
         
         print(f"오버레이 완료: {overlay.shape}, 마스크 적용됨")
@@ -643,7 +726,12 @@ class OverlayManager:
                     overlay = self._overlay_instances(overlay, (scale_mask_resized > 0), palette_type='scale', alpha=alpha_scale, contour_thickness=overlay_contour_thickness)
                 # Scale 윤곽선
                 scale_contours_res, _ = cv2.findContours((scale_mask_resized > 0).astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(overlay, scale_contours_res, -1, (255, 0, 255), overlay_contour_thickness)
+                overlay = self._draw_dashed_contours(
+                    overlay,
+                    scale_contours_res,
+                    (255, 255, 255),
+                    overlay_contour_thickness,
+                )
                 print("Scale 마스크(다색) 오버레이 적용")
         else:
             print("Scale 마스크 없음 - 오버레이 스킵")
@@ -685,12 +773,7 @@ class OverlayManager:
                     num_scales = len(scale_contours_res2)
                 else:
                     num_scales = 0
-            lines = [f"Leaves: {num_leaves}, Scales: {num_scales}"]
-            if stats is not None:
-                del_leaf = int(stats.get("deleted_leaf_count", 0))
-                del_scale = int(stats.get("deleted_scale_count", 0))
-                if del_leaf > 0 or del_scale > 0:
-                    lines.append(f"Deleted: Leaf {del_leaf}, Scale {del_scale}")
+            lines = self._build_overlay_lines(num_leaves, num_scales, stats=stats, suffix="")
             overlay = self._draw_text_block(overlay, lines)
         except Exception:
             pass
@@ -724,4 +807,4 @@ class OverlayManager:
         self.canvas.create_image(canvas_width//2, canvas_height//2, image=self.photo)
         print("최종 결과 표시 완료")
     
-    # GrabCut 전환으로 자동 튜닝 기능 제거됨
+    # 레거시 자동 튜닝 기능 제거됨

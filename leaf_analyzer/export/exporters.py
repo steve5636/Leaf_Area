@@ -121,10 +121,19 @@ class DataExporter:
             return
         try:
             # 저장 디렉토리 선택
-            out_dir = filedialog.askdirectory(title="YOLO OBB 내보낼 디렉토리 선택")
+            dialog_kwargs = {"title": "YOLO OBB 내보낼 디렉토리 선택"}
+            try:
+                dialog_kwargs["initialdir"] = self._get_initial_browse_dir()
+            except Exception:
+                pass
+            out_dir = filedialog.askdirectory(**dialog_kwargs)
             self._safe_refocus()
             if not out_dir:
                 return
+            try:
+                self._set_last_browse_dir(out_dir)
+            except Exception:
+                pass
             self._ensure_dir(out_dir)
             images_dir = os.path.join(out_dir, "images")
             labels_dir = os.path.join(out_dir, "labels")
@@ -137,7 +146,8 @@ class DataExporter:
             # 파일명 결정
             base_name = os.path.splitext(os.path.basename(getattr(self, 'current_image_path', 'image')))[0]
             img_path = os.path.join(images_dir, base_name + ".jpg")
-            cv2.imwrite(img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            if not self._imwrite_unicode(img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)):
+                raise RuntimeError(f"image_write_failed: {img_path}")
 
             # 활성 객체 수집
             active_leaf = self._gather_active_leaf_objects()
@@ -210,7 +220,7 @@ class DataExporter:
                     cv2.polylines(dbg, [pts_i], True, color, 2)
                     tx, ty = int(pts_i[0][0]), int(pts_i[0][1])
                     cv2.putText(dbg, f"{cid}:{oid}", (tx+2, ty+2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                cv2.imwrite(os.path.join(debug_dir, base_name + "_obb_viz.jpg"), cv2.cvtColor(dbg, cv2.COLOR_RGB2BGR))
+                self._imwrite_unicode(os.path.join(debug_dir, base_name + "_obb_viz.jpg"), cv2.cvtColor(dbg, cv2.COLOR_RGB2BGR))
             except Exception:
                 pass
 
@@ -227,10 +237,19 @@ class DataExporter:
             self._safe_refocus()
             return
         try:
-            out_dir = filedialog.askdirectory(title="YOLO Seg 내보낼 디렉토리 선택")
+            dialog_kwargs = {"title": "YOLO Seg 내보낼 디렉토리 선택"}
+            try:
+                dialog_kwargs["initialdir"] = self._get_initial_browse_dir()
+            except Exception:
+                pass
+            out_dir = filedialog.askdirectory(**dialog_kwargs)
             self._safe_refocus()
             if not out_dir:
                 return
+            try:
+                self._set_last_browse_dir(out_dir)
+            except Exception:
+                pass
             self._ensure_dir(out_dir)
             images_dir = os.path.join(out_dir, "images")
             labels_dir = os.path.join(out_dir, "labels")
@@ -242,7 +261,8 @@ class DataExporter:
             h, w = img.shape[:2]
             base_name = os.path.splitext(os.path.basename(getattr(self, 'current_image_path', 'image')))[0]
             img_path = os.path.join(images_dir, base_name + ".jpg")
-            cv2.imwrite(img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            if not self._imwrite_unicode(img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)):
+                raise RuntimeError(f"image_write_failed: {img_path}")
 
             # 활성 객체 수집
             active_leaf = self._gather_active_leaf_objects()
@@ -337,10 +357,19 @@ class DataExporter:
             self._safe_refocus()
             return
         try:
-            out_dir = filedialog.askdirectory(title="COCO Seg 내보낼 디렉토리 선택")
+            dialog_kwargs = {"title": "COCO Seg 내보낼 디렉토리 선택"}
+            try:
+                dialog_kwargs["initialdir"] = self._get_initial_browse_dir()
+            except Exception:
+                pass
+            out_dir = filedialog.askdirectory(**dialog_kwargs)
             self._safe_refocus()
             if not out_dir:
                 return
+            try:
+                self._set_last_browse_dir(out_dir)
+            except Exception:
+                pass
             self._ensure_dir(out_dir)
             images_dir = os.path.join(out_dir, "images")
             self._ensure_dir(images_dir)
@@ -349,7 +378,9 @@ class DataExporter:
             h, w = img.shape[:2]
             base_name = os.path.splitext(os.path.basename(getattr(self, 'current_image_path', 'image')))[0]
             img_file = base_name + ".jpg"
-            cv2.imwrite(os.path.join(images_dir, img_file), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            image_out_path = os.path.join(images_dir, img_file)
+            if not self._imwrite_unicode(image_out_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)):
+                raise RuntimeError(f"image_write_failed: {image_out_path}")
 
             # 활성 객체 수집
             active_leaf = self._gather_active_leaf_objects()
@@ -543,7 +574,7 @@ class DataExporter:
                                     cv2.polylines(vis_img, [pts], True, color, 1)
                         except Exception:
                             pass
-                cv2.imwrite(os.path.join(debug_dir, base_name + "_coco_viz.jpg"), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
+                self._imwrite_unicode(os.path.join(debug_dir, base_name + "_coco_viz.jpg"), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
             except Exception:
                 pass
 
@@ -568,149 +599,122 @@ class DataExporter:
         if not file_path:
             return
         try:
-            # 삭제되지 않은 객체만 필터링
-            filtered_objects = [
-                obj for obj in self.analysis_results['objects']
-                if obj.get('id', 0) not in self._deleted_objects
-            ]
-
+            filtered_objects = self._gather_active_leaf_objects()
             if len(filtered_objects) == 0:
                 messagebox.showwarning("경고", "내보낼 객체가 없습니다. (모두 삭제됨)")
                 self._safe_refocus()
                 return
 
-            # pixels_per_cm2 재계산
             pixels_per_cm2_val, has_scale = self._get_export_scale_factor()
-            if not has_scale or not pixels_per_cm2_val:
-                pixels_per_cm2_val = self.analysis_results.get('pixels_per_cm2', 1.0) if self.analysis_results else 1.0
-            pixels_per_cm2_val = float(pixels_per_cm2_val) if pixels_per_cm2_val else 1.0
-            
-            # 길이 변환 계수 (면적의 제곱근)
+            pixels_per_cm2_val = float(pixels_per_cm2_val) if pixels_per_cm2_val else 0.0
             pixels_per_cm = np.sqrt(pixels_per_cm2_val) if has_scale and pixels_per_cm2_val > 0 else None
 
+            include_pixels_opt = False
+            if hasattr(self, "csv_include_pixels_var"):
+                try:
+                    include_pixels_opt = bool(self.csv_include_pixels_var.get())
+                except Exception:
+                    include_pixels_opt = False
+            # Scale이 없으면 원래대로 픽셀 저장
+            include_pixels = include_pixels_opt or (not has_scale)
+
+            # 활성 Scale 집계
+            scale_masks = self._gather_active_scale_masks()
+            scale_count = len(scale_masks)
+            scale_total_area_px = int(sum(int(np.sum(m)) for _, m in scale_masks)) if scale_masks else 0
+            scale_total_area_cm2 = (scale_total_area_px / pixels_per_cm2_val) if (has_scale and pixels_per_cm2_val > 0) else None
+
+            # 헤더 구성
+            headers = ["Row_Type", "Leaf_ID"]
+            if has_scale:
+                headers.extend(["Leaf_Area_cm2", "Leaf_Length_cm", "Leaf_Width_cm", "Leaf_Perimeter_cm"])
+            if include_pixels:
+                headers.extend(["Leaf_Area_pixels", "Leaf_Length_pixels", "Leaf_Width_pixels", "Leaf_Perimeter_pixels"])
+            headers.extend(["Center_X", "Center_Y", "Scale_Count"])
+            if has_scale:
+                headers.append("Scale_Total_Area_cm2")
+            if include_pixels:
+                headers.append("Scale_Total_Area_pixels")
+            if has_scale:
+                headers.append("Pixels_per_cm2")
+            headers.append("Status")
+
+            rows = []
+            for obj in filtered_objects:
+                cx, cy = obj.get("center", (0, 0))
+                row = {"Row_Type": "leaf", "Leaf_ID": obj.get("id", 0)}
+                if has_scale and pixels_per_cm:
+                    row["Leaf_Area_cm2"] = float(obj.get("area", 0.0)) / float(pixels_per_cm2_val)
+                    row["Leaf_Length_cm"] = float(obj.get("length", 0.0)) / float(pixels_per_cm)
+                    row["Leaf_Width_cm"] = float(obj.get("width", 0.0)) / float(pixels_per_cm)
+                    row["Leaf_Perimeter_cm"] = float(obj.get("perimeter", 0.0)) / float(pixels_per_cm)
+                if include_pixels:
+                    row["Leaf_Area_pixels"] = float(obj.get("area", 0.0))
+                    row["Leaf_Length_pixels"] = float(obj.get("length", 0.0))
+                    row["Leaf_Width_pixels"] = float(obj.get("width", 0.0))
+                    row["Leaf_Perimeter_pixels"] = float(obj.get("perimeter", 0.0))
+                row["Center_X"] = cx
+                row["Center_Y"] = cy
+                row["Scale_Count"] = scale_count
+                if has_scale:
+                    row["Scale_Total_Area_cm2"] = scale_total_area_cm2 if scale_total_area_cm2 is not None else ""
+                if include_pixels:
+                    row["Scale_Total_Area_pixels"] = scale_total_area_px
+                if has_scale:
+                    row["Pixels_per_cm2"] = pixels_per_cm2_val
+                row["Status"] = "Active"
+                rows.append(row)
+
+            # 합계/평균 행
+            n = max(1, len(filtered_objects))
+            total_area_px = float(sum(float(o.get("area", 0.0)) for o in filtered_objects))
+            total_len_px = float(sum(float(o.get("length", 0.0)) for o in filtered_objects))
+            total_wid_px = float(sum(float(o.get("width", 0.0)) for o in filtered_objects))
+            total_per_px = float(sum(float(o.get("perimeter", 0.0)) for o in filtered_objects))
+
+            total_row = {"Row_Type": "summary_total", "Leaf_ID": "ALL", "Scale_Count": scale_count, "Status": "Summary"}
+            avg_row = {"Row_Type": "summary_avg", "Leaf_ID": "ALL", "Scale_Count": scale_count, "Status": "Summary"}
+
+            if has_scale and pixels_per_cm:
+                total_row["Leaf_Area_cm2"] = total_area_px / pixels_per_cm2_val
+                total_row["Leaf_Length_cm"] = total_len_px / pixels_per_cm
+                total_row["Leaf_Width_cm"] = total_wid_px / pixels_per_cm
+                total_row["Leaf_Perimeter_cm"] = total_per_px / pixels_per_cm
+                avg_row["Leaf_Area_cm2"] = (total_area_px / pixels_per_cm2_val) / n
+                avg_row["Leaf_Length_cm"] = (total_len_px / pixels_per_cm) / n
+                avg_row["Leaf_Width_cm"] = (total_wid_px / pixels_per_cm) / n
+                avg_row["Leaf_Perimeter_cm"] = (total_per_px / pixels_per_cm) / n
+                total_row["Scale_Total_Area_cm2"] = scale_total_area_cm2 if scale_total_area_cm2 is not None else ""
+                avg_row["Scale_Total_Area_cm2"] = scale_total_area_cm2 if scale_total_area_cm2 is not None else ""
+                total_row["Pixels_per_cm2"] = pixels_per_cm2_val
+                avg_row["Pixels_per_cm2"] = pixels_per_cm2_val
+            if include_pixels:
+                total_row["Leaf_Area_pixels"] = total_area_px
+                total_row["Leaf_Length_pixels"] = total_len_px
+                total_row["Leaf_Width_pixels"] = total_wid_px
+                total_row["Leaf_Perimeter_pixels"] = total_per_px
+                avg_row["Leaf_Area_pixels"] = total_area_px / n
+                avg_row["Leaf_Length_pixels"] = total_len_px / n
+                avg_row["Leaf_Width_pixels"] = total_wid_px / n
+                avg_row["Leaf_Perimeter_pixels"] = total_per_px / n
+                total_row["Scale_Total_Area_pixels"] = scale_total_area_px
+                avg_row["Scale_Total_Area_pixels"] = scale_total_area_px
+
             with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                
-                # Header: Scale 있을 때만 cm 단위 추가
-                if pixels_per_cm:
-                    writer.writerow(['Leaf_ID', 'Area_pixels', 'Area_cm2', 'Length_pixels', 'Length_cm', 'Width_pixels', 'Width_cm', 'Perimeter_pixels', 'Perimeter_cm', 'Center_X', 'Center_Y', 'Status'])
-                else:
-                    writer.writerow(['Leaf_ID', 'Area_pixels', 'Length_pixels', 'Width_pixels', 'Perimeter_pixels', 'Center_X', 'Center_Y', 'Status'])
-
-                # Leaf objects
-                for obj in filtered_objects:
-                    center_x, center_y = obj.get("center", (0, 0))
-                    
-                    if pixels_per_cm:
-                        writer.writerow([
-                            obj.get('id', 0),
-                            obj.get('area', 0),
-                            obj.get('area', 0) / pixels_per_cm2_val,
-                            obj.get('length', 0),
-                            obj.get('length', 0) / pixels_per_cm,
-                            obj.get('width', 0),
-                            obj.get('width', 0) / pixels_per_cm,
-                            obj.get('perimeter', 0),
-                            obj.get('perimeter', 0) / pixels_per_cm,
-                            center_x,
-                            center_y,
-                            'Active'
-                        ])
-                    else:
-                        writer.writerow([
-                            obj.get('id', 0),
-                            obj.get('area', 0),
-                            obj.get('length', 0),
-                            obj.get('width', 0),
-                            obj.get('perimeter', 0),
-                            center_x,
-                            center_y,
-                            'Active'
-                        ])
-
-                # Scale info
-                if self._current_scale_labels is not None:
-                    # Scale 라벨맵이 있는 경우
-                    scale_labels = self._current_scale_labels
-                    unique_scale_ids = np.unique(scale_labels)
-                    active_scale_objects = 0
-
-                    writer.writerow([])
-                    writer.writerow(['=== Scale Information ==='])
-                    writer.writerow(['Scale_ID', 'Area_pixels', 'Area_cm2', 'Center_X', 'Center_Y', 'Status'])
-
-                    for scale_id in unique_scale_ids:
-                        if scale_id > 0 and scale_id not in self._deleted_scale_objects:
-                            scale_mask = (scale_labels == scale_id)
-                            scale_area = np.sum(scale_mask)
-
-                            if scale_area > 0:
-                                # Scale 객체 중심 계산
-                                y_coords, x_coords = np.where(scale_mask)
-                                center_x = int(np.mean(x_coords))
-                                center_y = int(np.mean(y_coords))
-
-                                writer.writerow([
-                                    f'S{scale_id}',
-                                    scale_area,
-                                    (scale_area / pixels_per_cm2_val) if pixels_per_cm2_val else "",
-                                    center_x,
-                                    center_y,
-                                    'Active'
-                                ])
-                                active_scale_objects += 1
-
-                    if active_scale_objects == 0:
-                        writer.writerow(['No active scale objects'])
-                elif 'scale_mask' in self.analysis_results:
-                    # 기본 분석 경로: 라벨맵이 없어도 scale_mask 연결 성분으로 목록 생성
-                    try:
-                        writer.writerow([])
-                        writer.writerow(['=== Scale Information ==='])
-                        writer.writerow(['Scale_ID', 'Area_pixels', 'Area_cm2', 'Center_X', 'Center_Y', 'Status'])
-                        sm = self.analysis_results.get('scale_mask')
-                        sm = np.asarray(sm).astype(np.uint8)
-                        if sm.size > 0 and int(np.sum(sm)) > 0:
-                            num_labels, labels = cv2.connectedComponents(sm, connectivity=8)
-                            active_scale_objects = 0
-                            for sid in range(1, num_labels):
-                                mask_sid = (labels == sid)
-                                scale_area = int(np.sum(mask_sid))
-                                if scale_area <= 0:
-                                    continue
-                                ys, xs = np.where(mask_sid)
-                                cx = int(np.mean(xs)) if xs.size > 0 else 0
-                                cy = int(np.mean(ys)) if ys.size > 0 else 0
-                                writer.writerow([
-                                    f'S{sid}',
-                                    scale_area,
-                                    (scale_area / pixels_per_cm2_val) if pixels_per_cm2_val else "",
-                                    cx,
-                                    cy,
-                                    'Active'
-                                ])
-                                active_scale_objects += 1
-                            if active_scale_objects == 0:
-                                writer.writerow(['No active scale objects'])
-                        else:
-                            writer.writerow(['No active scale objects'])
-                    except Exception:
-                        pass
+                writer = csv.DictWriter(csvfile, fieldnames=headers, extrasaction="ignore")
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+                # 한 줄 띄우기
+                writer.writerow({k: "" for k in headers})
+                writer.writerow(total_row)
+                writer.writerow(avg_row)
 
             total_exported = len(filtered_objects)
-            total_deleted = len(self._deleted_objects) + len(self._deleted_scale_objects)
-
-            # 팝업: Leaf/Scale 분리 요약
-            if self._current_scale_labels is not None:
-                active_scale = len([sid for sid in np.unique(self._current_scale_labels) if sid > 0 and sid not in self._deleted_scale_objects])
-                total_scale = len([sid for sid in np.unique(self._current_scale_labels) if sid > 0])
-            else:
-                active_scale = int(np.sum(self.analysis_results.get('scale_mask', np.zeros((1,1),dtype=bool)))) > 0
-                total_scale = 1 if active_scale else 0
             msg = (
                 f"CSV 파일이 저장되었습니다:\n{file_path}\n\n"
                 f"Leaf: 내보낸 {total_exported}개, 숨김 {len(self._deleted_objects)}개\n"
-                f"Scale: 내보낸 {active_scale}개, 숨김 {len(self._deleted_scale_objects)}개 (전체 {total_scale}개)"
+                f"Scale: 내보낸 {scale_count}개, 숨김 {len(self._deleted_scale_objects)}개"
             )
             messagebox.showinfo("성공", msg)
             self._safe_refocus()

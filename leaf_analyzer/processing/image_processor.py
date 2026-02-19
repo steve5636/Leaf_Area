@@ -7,6 +7,7 @@ Image Processor for Advanced Leaf Analyzer
 
 import cv2
 import numpy as np
+import hashlib
 from typing import List, Tuple, Optional
 from scipy import ndimage
 from skimage.morphology import remove_small_holes, remove_small_objects
@@ -48,10 +49,11 @@ class ImageProcessor:
         
         # 캐시 키 생성 (mask 내용 기반 해시 + 버전)
         h, w = mask.shape[:2]
-        step = max(1, h * w // 1000)  # 최대 1000개 샘플
-        mask_flat = mask.flat[::step]
-        mask_hash = hash(mask_flat.tobytes())
-        base_id = f"{mask_hash}_{h}_{w}"
+        # 전체 바이트 해시 사용: 희소 마스크(스케일)에서 샘플 해시 충돌 방지
+        mask_u8 = np.ascontiguousarray(mask.astype(np.uint8))
+        mask_hash = hashlib.blake2b(mask_u8.tobytes(), digest_size=8).hexdigest()
+        nz_count = int(np.count_nonzero(mask_u8))
+        base_id = f"{mask_hash}_{h}_{w}_{nz_count}"
         if mask_id is None:
             mask_id = base_id
         else:

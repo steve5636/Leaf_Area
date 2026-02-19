@@ -1,3 +1,4 @@
+# Requires Python >=3.12,<3.13
 numpy
 opencv-python
 scipy
@@ -5,8 +6,10 @@ scikit-image
 Pillow
 networkx
 customtkinter
+tkinterdnd2
 torch
 torchvision
 huggingface_hub
 einops
 pycocotools
+tqdm

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Advanced Leaf Area Analyzer Package
-GrabCut 기반 전경(잎) 분리 + 형태학 분석
+기본 분석 + SAM3 기반 잎/스케일 분석
 """
 
 __version__ = "2.0.0"

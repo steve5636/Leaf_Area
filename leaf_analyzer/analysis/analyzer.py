@@ -5,11 +5,9 @@ Leaf Analyzer for Advanced Leaf Analyzer
 분석 로직
 """
 
-import time
 import numpy as np
 import cv2
 from tkinter import messagebox
-from skimage import measure
 from scipy import ndimage
 
 from ..core.morphology import MorphologicalAnalyzer
@@ -124,18 +122,28 @@ class LeafAnalyzer:
 
     def _build_basic_result_message(self, leaf_count: int, leaf_area_px: int, scale_area_px: int, minG: int, ratG: float, ratGb: float) -> str:
         """기본 분석 결과 메시지 생성"""
+        scale_area_cm2_setting = float(self.settings.get("scale_area_cm2", 4.0))
+        has_scale = scale_area_px > 0 and scale_area_cm2_setting > 0
+        if has_scale:
+            pixels_per_cm2 = float(scale_area_px) / float(scale_area_cm2_setting)
+            leaf_area_text = f"{(float(leaf_area_px) / max(pixels_per_cm2, 1e-9)):.2f} cm² ({leaf_area_px} 픽셀)"
+            scale_area_text = f"{scale_area_cm2_setting:.2f} cm² ({scale_area_px} 픽셀)"
+        else:
+            leaf_area_text = f"{leaf_area_px} 픽셀 (Scale 없음: cm² 환산 불가)"
+            scale_area_text = "미검출 (cm² 환산 불가)"
+
         message = f"""기본 분석 완료!
     
 탐지된 잎: {leaf_count}개
-잎 면적: {leaf_area_px} 픽셀
-스케일 면적: {scale_area_px} 픽셀
+활성 면적: {leaf_area_text}
+Scale 면적: {scale_area_text}
     
 사용된 파라미터:
 - 최소 녹색값: {minG}
 - G/R 비율: {ratG}
 - G/B 비율: {ratGb}
     
-만약 결과가 만족스럽지 않으면 '고급 분석'을 사용하세요."""
+필요하면 '혼합 분석 (SAM3)' 또는 'SAM3 누락 객체 추가'로 보정하세요."""
         return message
 
     def _compute_result_stats(self) -> dict:
@@ -180,25 +188,31 @@ class LeafAnalyzer:
         }
 
     def _build_analysis_result_message(self, stats: dict) -> str:
-        """고급 분석 결과 메시지 생성"""
+        """분석 결과 메시지 생성"""
         results = self.analysis_results or {}
-        method = results.get('method', 'advanced')
+        method = results.get('method', 'sam3_mixed')
         if method == "basic_color_ratio":
             method_text = "기본 분석 (색상 비율)"
         elif method == "sam3_mixed":
             method_text = "혼합 분석 (SAM3)"
         else:
-            method_text = "고급 분석"
+            method_text = "분석"
 
-        # 스케일 면적 정보
-        scale_info = ""
+        scale_area_px = 0.0
         if 'scale_mask' in results and results['scale_mask'] is not None:
-            scale_area = np.sum(results['scale_mask'])
-            if scale_area > 0:
-                scale_info = f"\n스케일 면적: {scale_area:.0f} 픽셀"
-                if results.get('pixels_per_cm2', 1) > 0:
-                    scale_cm2 = scale_area / results['pixels_per_cm2']
-                    scale_info += f" ({scale_cm2:.2f} cm²)"
+            scale_area_px = float(np.sum(results['scale_mask']))
+        pixels_per_cm2 = float(results.get("pixels_per_cm2", 0) or 0)
+        has_scale = scale_area_px > 0 and pixels_per_cm2 > 0
+
+        if has_scale:
+            active_area_line = (
+                f"활성 면적: {(stats['active_leaf_area_px'] / pixels_per_cm2):.2f} cm² "
+                f"({stats['active_leaf_area_px']:.0f} 픽셀)"
+            )
+            scale_line = f"Scale 면적: {(scale_area_px / pixels_per_cm2):.2f} cm² ({scale_area_px:.0f} 픽셀)"
+        else:
+            active_area_line = f"활성 면적: {stats['active_leaf_area_px']:.0f} 픽셀 (Scale 없음: cm² 환산 불가)"
+            scale_line = "Scale 면적: 미검출 (cm² 환산 불가)"
 
         # 삭제 정보
         deletion_info = ""
@@ -212,10 +226,9 @@ class LeafAnalyzer:
             f"분석 완료! [{method_text}]\n\n"
             f"전체 객체: Leaf {stats['total_leaf_count']}개, Scale {stats['total_scale_count']}개 (합계: {stats['total_leaf_count'] + stats['total_scale_count']}개)\n"
             f"활성 객체: Leaf {stats['active_leaf_count']}개, Scale {stats['active_scale_count']}개 (합계: {stats['active_leaf_count'] + stats['active_scale_count']}개)\n"
-            f"활성 면적: {stats['active_leaf_area_px']:.0f} 픽셀 "
-            f"({stats['active_leaf_area_px'] / max(results.get('pixels_per_cm2', 1), 1):.2f} cm²)"
-            f"{scale_info}{deletion_info}\n\n"
-            f"개별 잎 정보 (활성만):"
+            f"{active_area_line}\n"
+            f"{scale_line}"
+            f"{deletion_info}"
         )
 
         if method == "sam3_mixed":
@@ -231,139 +244,364 @@ class LeafAnalyzer:
                 note = " (완화됨)" if relaxed else ""
                 message = f"[최소 면적: {min_area_used}px{note}]\n" + message
 
-        # 활성 객체만 표시 (상위 5개)
-        active_leaf_objects = stats.get("active_leaf_objects", [])
-        for i, obj in enumerate(active_leaf_objects[:5]):
-            message += f"\n잎 {i+1}: {obj['area']:.0f}픽셀, 길이 {obj['length']:.1f}, 너비 {obj['width']:.1f}"
-
-        if len(active_leaf_objects) > 5:
-            message += f"\n... 외 {len(active_leaf_objects)-5}개"
-
         if stats["deleted_leaf_count"] > 0 or stats.get("deleted_scale_count", 0) > 0:
             message += (
                 f"\n\n[Ctrl+클릭으로 숨김 상태 관리 중 - Leaf {stats['deleted_leaf_count']}, "
                 f"Scale {stats.get('deleted_scale_count', 0)}]"
             )
         return message
-    def analyze_image(self, forced: bool = False):
-        """[개선] 간소화된 GrabCut 기반 이미지 분석"""
-        print("analyze_image() 시작")
-        now = time.monotonic()
-        if not forced and (now - getattr(self, '_last_analyze_ts', 0.0)) < getattr(self, '_analyze_cooldown_seconds', 0.75):
+
+    def _ensure_seed_buckets(self) -> dict:
+        """시드 버킷 키(leaf/scale/background) 존재 보장."""
+        if not hasattr(self, "seed_manager") or self.seed_manager is None:
+            return {}
+        seeds = getattr(self.seed_manager, "seeds", None)
+        if not isinstance(seeds, dict):
+            seeds = {}
+            self.seed_manager.seeds = seeds
+        for key in ("leaf", "scale", "background"):
+            if key not in seeds or not isinstance(seeds.get(key), list):
+                seeds[key] = list(seeds.get(key, [])) if isinstance(seeds.get(key, []), (list, tuple)) else []
+        return seeds
+
+    def _pick_correction_candidate(
+        self,
+        segments,
+        existing_mask: np.ndarray,
+        min_new_pixels: int,
+        positive_points=None,
+        negative_points=None,
+    ):
+        """기존 마스크와 겹치지 않는 신규 픽셀이 충분한 SAM3 후보를 선택.
+
+        우선순위:
+        1) positive point를 포함하는 후보
+        2) negative point를 덜 포함하는 후보
+        3) 신규 픽셀 면적/점수
+        """
+        if existing_mask is None:
+            existing_mask = np.zeros((0, 0), dtype=bool)
+        pos_points = list(positive_points or [])
+        neg_points = list(negative_points or [])
+        best = None
+        for seg in segments:
+            mask = np.asarray(seg.get("mask")).astype(bool)
+            if mask.size == 0:
+                continue
+            h, w = mask.shape[:2]
+            if existing_mask.shape != mask.shape:
+                existing = np.zeros_like(mask, dtype=bool)
+            else:
+                existing = existing_mask
+            area = int(np.sum(mask))
+            if area <= 0:
+                continue
+            new_mask = mask & (~existing)
+            new_area = int(np.sum(new_mask))
+            if new_area < int(max(1, min_new_pixels)):
+                continue
+            overlap_ratio = float((area - new_area) / max(1, area))
+            # 대부분이 기존 객체와 중복되면 신규 객체로 채택하지 않음
+            if overlap_ratio >= 0.95:
+                continue
+
+            # positive point가 하나도 포함되지 않으면 제외 (위치 일관성 강화)
+            pos_hits = 0
+            for px, py in pos_points:
+                x = int(np.clip(round(float(px)), 0, max(0, w - 1)))
+                y = int(np.clip(round(float(py)), 0, max(0, h - 1)))
+                if bool(mask[y, x]):
+                    pos_hits += 1
+            if len(pos_points) > 0 and pos_hits <= 0:
+                continue
+
+            neg_hits = 0
+            for nx, ny in neg_points:
+                x = int(np.clip(round(float(nx)), 0, max(0, w - 1)))
+                y = int(np.clip(round(float(ny)), 0, max(0, h - 1)))
+                if bool(mask[y, x]):
+                    neg_hits += 1
+
+            score = float(seg.get("score", 0.0))
+            rank = (pos_hits, -neg_hits, new_area, score)
+            if (best is None) or (rank > best["rank"]):
+                best = {
+                    "new_mask": new_mask,
+                    "score": score,
+                    "new_area": new_area,
+                    "pos_hits": pos_hits,
+                    "neg_hits": neg_hits,
+                    "rank": rank,
+                }
+        return best
+
+    def _recompute_analysis_summary(self):
+        """analysis_results 요약 필드(면적/스케일 환산) 재계산."""
+        if not isinstance(self.analysis_results, dict):
             return
-        self._last_analyze_ts = now
-        if getattr(self, 'is_analyzing', False):
-            return
+        objects = self.analysis_results.get("objects", [])
+        if not isinstance(objects, list):
+            objects = []
+            self.analysis_results["objects"] = objects
+        total_leaf_area_pixels = int(sum(float(obj.get("area", 0.0)) for obj in objects))
+        self.analysis_results["total_leaf_area_pixels"] = total_leaf_area_pixels
+        self.analysis_results["total_objects"] = int(len(objects))
+
+        scale_mask = self.analysis_results.get("scale_mask", None)
+        scale_area_pixels = int(np.sum(scale_mask)) if scale_mask is not None else 0
+        if scale_area_pixels > 0:
+            scale_area_cm2 = float(self.settings.get("scale_area_cm2", 4.0))
+            if scale_area_cm2 <= 0:
+                scale_area_cm2 = 4.0
+            pixels_per_cm2 = float(scale_area_pixels) / float(scale_area_cm2)
+            total_leaf_area_cm2 = float(total_leaf_area_pixels) / max(pixels_per_cm2, 1e-9)
+        else:
+            pixels_per_cm2 = 1.0
+            total_leaf_area_cm2 = 0.0
+        self.analysis_results["pixels_per_cm2"] = pixels_per_cm2
+        self.analysis_results["total_leaf_area_cm2"] = total_leaf_area_cm2
+
+    def apply_sam3_seed_correction(self, show_message: bool = True) -> bool:
+        """시드(포인트) 기반 SAM3 후보정: 누락 객체 1개 추가."""
+        self._last_analysis_error = None
+        if self.original_image is None:
+            self._last_analysis_error = "image_not_loaded"
+            if show_message:
+                messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
+                self._safe_refocus()
+            return False
+        if not isinstance(self.analysis_results, dict):
+            self._last_analysis_error = "no_analysis_results"
+            if show_message:
+                messagebox.showwarning("후보정", "먼저 기본 분석 또는 혼합 분석(SAM3)을 실행하세요.")
+                self._safe_refocus()
+            return False
+        if getattr(self, "is_analyzing", False):
+            self._last_analysis_error = "analyze_in_progress"
+            return False
+
+        seeds = self._ensure_seed_buckets()
+        leaf_pos = list(seeds.get("leaf", []))
+        scale_pos = list(seeds.get("scale", []))
+        bg_neg = list(seeds.get("background", []))
+
+        has_leaf = len(leaf_pos) > 0
+        has_scale = len(scale_pos) > 0
+        if has_leaf and has_scale:
+            self._last_analysis_error = "mixed_target_seeds"
+            if show_message:
+                messagebox.showwarning(
+                    "후보정",
+                    "Leaf와 Scale 양쪽 시드가 동시에 있습니다.\n한 대상만 남기고 다시 시도하세요."
+                )
+                self._safe_refocus()
+            return False
+        if (not has_leaf) and (not has_scale):
+            self._last_analysis_error = "missing_positive_seed"
+            if show_message:
+                messagebox.showwarning(
+                    "후보정",
+                    "누락 객체를 추가하려면 Leaf 또는 Scale 시드를 1개 이상 찍어주세요."
+                )
+                self._safe_refocus()
+            return False
+
+        target = "leaf" if has_leaf else "scale"
+        positive_points = leaf_pos if target == "leaf" else scale_pos
+
+        try:
+            score_var = getattr(self, "sam3_score_threshold_var", None)
+            score_threshold = float(score_var.get()) if score_var else 0.4
+        except Exception:
+            score_threshold = 0.4
+        score_threshold = float(np.clip(score_threshold, 0.0, 1.0))
+        max_instances = int(self.settings.get("sam3_max_instances", 100))
+        img = self.working_image if hasattr(self, "working_image") and self.working_image is not None else self.original_image
+        h, w = img.shape[:2]
+
+        if target == "leaf":
+            prompt_var = getattr(self, "sam3_prompt_var", None)
+            prompt = prompt_var.get() if prompt_var else "leaf"
+        else:
+            scale_color = getattr(self, "scale_color_var", None)
+            scale_mode = scale_color.get() if scale_color else "red"
+            prompt = "red square" if scale_mode == "red" else "blue square"
+
+        points = [tuple(map(float, pt)) for pt in positive_points]
+        labels = [1] * len(points)
+        points.extend([tuple(map(float, pt)) for pt in bg_neg])
+        labels.extend([0] * len(bg_neg))
+
+        segmenter = getattr(self, "_sam3_segmenter", None)
+        if segmenter is None:
+            segmenter = Sam3Segmenter()
+            self._sam3_segmenter = segmenter
+
         self.is_analyzing = True
         try:
-            if hasattr(self, 'analyze_button') and self.analyze_button:
-                self.analyze_button.configure(state="disabled")
-        except Exception:
-            pass
-        try:
-            if self.original_image is None:
-                messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
-                self._safe_refocus()  # messagebox 후 포커스 관리
-                return
-            if len(self.seed_manager.seeds.get("leaf", [])) < self.settings["min_seeds_required"].get("leaf", 1):
-                messagebox.showwarning("경고", "잎(leaf) 시드를 더 추가해주세요.")
-                self._safe_refocus()  # messagebox 후 포커스 관리
-                return
-            
-            # 1) 세그멘테이션으로 전체 잎 영역 추정
-            print("[1/2] 전체 잎 영역 분할 중...")
-            coarse_leaf_mask = self.generate_leaf_mask()
-    
-            # 2) 연결 성분 분석으로 개별 잎 분리
-            final_instance_labels, num_objects = measure.label(coarse_leaf_mask, connectivity=2, return_num=True)
-            print(f"   ↳ 검출된 객체: {num_objects}개")
-            
-            final_leaf_mask = coarse_leaf_mask
-            current_label_id = num_objects
-    
-            # 3) 형태 분석
-            print(f"[2/2] 최종 {current_label_id}개 잎 형태 분석 중...")
-            leaf_objects = []
-            for leaf_id in range(1, current_label_id + 1):
-                single_leaf_mask = (final_instance_labels == leaf_id)
-                if np.sum(single_leaf_mask) < self.settings["min_object_area"]:
-                    continue
-                # 홀(내부) 반영 분석
-                obj_data = MorphologicalAnalyzer.analyze_mask_with_holes(single_leaf_mask)
-                obj_data["id"] = leaf_id
-                leaf_objects.append(obj_data)
-    
-            # Scale 마스크 생성 (Scale seed 유무에 따라 조건부 실행)
-            scale_seeds = self.seed_manager.seeds.get("scale", [])
-            scale_mask = None  # 없는 경우도 있으므로 기본값을 명시적으로 설정
-            if len(scale_seeds) > 0:
-                print(f"   → Scale seed {len(scale_seeds)}개 기반 Scale 마스크 생성")
-                scale_mask = self._generate_scale_mask_from_seeds(scale_seeds)
+            segments = segmenter.segment_image_with_points(
+                img,
+                prompt=prompt,
+                points=points,
+                point_labels=labels,
+                score_threshold=score_threshold,
+                max_instances=max_instances,
+            )
+        except Exception as e:
+            err_text = str(e)
+            if "MPS backend out of memory" in err_text:
+                self._last_analysis_error = "sam3_correction_mps_oom"
+                if show_message:
+                    messagebox.showerror(
+                        "SAM3 후보정 오류",
+                        "MPS 메모리 할당 오류가 발생했습니다.\n\n"
+                        "조치 방법:\n"
+                        "• 추론 리사이즈 배율을 높인 뒤 다시 시도\n"
+                        "• 앱을 재시작 후 재시도\n"
+                        "• 필요 시 CPU 환경에서 실행"
+                    )
+                    self._safe_refocus()
             else:
-                print("   → Scale seed 없음 - Scale 검출 스킵")
-                
-            scale_area_pixels = np.sum(scale_mask) if scale_mask is not None else 0
-            
-            total_leaf_area_pixels = sum(obj["area"] for obj in leaf_objects)
-            
-            # Scale 기반 실제 면적 계산
-            if scale_area_pixels > 0:
-                # 기본 4cm² 스케일 가정 (Easy Leaf Area 호환)
-                scale_area_cm2 = 4.0  # cm²
-                pixels_per_cm2 = scale_area_pixels / scale_area_cm2
-                total_leaf_area_cm2 = total_leaf_area_pixels / pixels_per_cm2
-                print(f"   → Scale 면적: {scale_area_pixels}px = {scale_area_cm2}cm² (비율: {pixels_per_cm2:.1f}px/cm²)")
-            else:
-                pixels_per_cm2 = 1
-                total_leaf_area_cm2 = 0
-                print("   → Scale 검출 안됨 (픽셀 단위로 표시)")
-            # 객체 선택적 삭제를 위한 인스턴스 라벨맵 저장
-            self._current_instance_labels = final_instance_labels
-            
-            # Scale 객체도 개별 삭제 가능하도록 라벨맵 생성
-            if scale_mask is not None and np.sum(scale_mask) > 0:
-                # Scale 마스크에 연결 성분 분석 적용
-                scale_num_labels, scale_labels = cv2.connectedComponents(
-                    scale_mask.astype(np.uint8), connectivity=8
-                )
-                self._current_scale_labels = scale_labels
-                print(f"   → Scale 개별 객체 라벨맵 생성: {scale_num_labels - 1}개 객체")
-            else:
-                self._current_scale_labels = None
-                print("   → Scale 객체 없음 - 라벨맵 생성 스킵")
-            
-            self.analysis_results = {
-                "total_objects": len(leaf_objects),
-                "total_leaf_area_pixels": total_leaf_area_pixels,
-                "total_leaf_area_cm2": total_leaf_area_cm2,
-                "pixels_per_cm2": pixels_per_cm2,
-                "objects": leaf_objects,
-                "leaf_mask": final_leaf_mask,
-                "scale_mask": scale_mask,
-                "method": "advanced"  # 분석 방법 표시
-            }
-            print(f"   ↳ final instances: {len(leaf_objects)}, total_pixels: {total_leaf_area_pixels}")
-            
-            # 미리보기는 실시간 파라미터 조정에서만 사용
-            # 분석 완료 후에는 최종 결과만 표시
-            self.show_analysis_results()
+                self._last_analysis_error = f"sam3_correction_error: {e}"
+                if show_message:
+                    messagebox.showerror(
+                        "SAM3 후보정 오류",
+                        f"후보정 중 오류가 발생했습니다:\n{e}"
+                    )
+                    self._safe_refocus()
+            return False
         finally:
             self.is_analyzing = False
-            try:
-                if hasattr(self, 'analyze_button') and self.analyze_button:
-                    self.analyze_button.configure(state="normal")
-            except Exception:
-                pass
 
-    def mixed_analyze_sam3(self):
+        if not segments:
+            self._last_analysis_error = "sam3_correction_no_segments"
+            if show_message:
+                messagebox.showwarning(
+                    "후보정",
+                    "시드 기반 SAM3 결과가 없습니다.\n시드를 추가하거나 점수 임계값을 낮춰보세요."
+                )
+                self._safe_refocus()
+            return False
+
+        if target == "leaf":
+            if self._current_instance_labels is not None and self._current_instance_labels.shape[:2] == (h, w):
+                existing_mask = self._current_instance_labels > 0
+                labels_map = self._current_instance_labels.astype(np.int32).copy()
+            else:
+                base_leaf_mask = np.asarray(self.analysis_results.get("leaf_mask")).astype(bool) if self.analysis_results.get("leaf_mask") is not None else np.zeros((h, w), dtype=bool)
+                _, labels_map = cv2.connectedComponents(base_leaf_mask.astype(np.uint8), connectivity=8)
+                labels_map = labels_map.astype(np.int32)
+                existing_mask = labels_map > 0
+            min_new_pixels = max(25, int(self.settings.get("min_object_area", 1000) * 0.15))
+        else:
+            if self._current_scale_labels is not None and self._current_scale_labels.shape[:2] == (h, w):
+                existing_mask = self._current_scale_labels > 0
+                labels_map = self._current_scale_labels.astype(np.int32).copy()
+            else:
+                base_scale_mask = np.asarray(self.analysis_results.get("scale_mask")).astype(bool) if self.analysis_results.get("scale_mask") is not None else np.zeros((h, w), dtype=bool)
+                _, labels_map = cv2.connectedComponents(base_scale_mask.astype(np.uint8), connectivity=8)
+                labels_map = labels_map.astype(np.int32)
+                existing_mask = labels_map > 0
+            min_new_pixels = max(15, int(self.settings.get("min_object_area", 1000) * 0.05))
+
+        picked = self._pick_correction_candidate(
+            segments,
+            existing_mask,
+            min_new_pixels=min_new_pixels,
+            positive_points=positive_points,
+            negative_points=bg_neg,
+        )
+        if picked is None:
+            self._last_analysis_error = "sam3_correction_no_new_pixels"
+            if show_message:
+                messagebox.showwarning(
+                    "후보정",
+                    "시드 위치를 포함하는 신규 객체를 찾지 못했습니다.\n"
+                    "• 누락 객체 내부에 Leaf/Scale 시드를 찍고\n"
+                    "• 필요하면 배경(-) 시드를 더 추가해 다시 시도하세요."
+                )
+                self._safe_refocus()
+            return False
+
+        new_mask = picked["new_mask"]
+        new_id = int(labels_map.max()) + 1
+        labels_map[new_mask] = new_id
+
+        if target == "leaf":
+            self._current_instance_labels = labels_map
+            new_obj = MorphologicalAnalyzer.analyze_mask_with_holes(new_mask)
+            new_obj["id"] = new_id
+            new_obj["score"] = float(picked["score"])
+            objects = self.analysis_results.get("objects", [])
+            if not isinstance(objects, list):
+                objects = []
+            objects.append(new_obj)
+            self.analysis_results["objects"] = objects
+            self.analysis_results["leaf_mask"] = (labels_map > 0)
+            if hasattr(self, "_deleted_objects"):
+                self._deleted_objects.discard(new_id)
+        else:
+            self._current_scale_labels = labels_map
+            self.analysis_results["scale_mask"] = (labels_map > 0)
+            if hasattr(self, "_deleted_scale_objects"):
+                self._deleted_scale_objects.discard(new_id)
+
+        self._recompute_analysis_summary()
+        self.analysis_results["sam3_point_correction"] = True
+        self.analysis_results["sam3_point_correction_target"] = target
+        self.analysis_results["sam3_point_correction_new_area"] = int(picked["new_area"])
+        self._reset_overlay_resize_cache()
+
+        # 후보정 완료 후 시드 정리
+        seeds["leaf"] = []
+        seeds["scale"] = []
+        seeds["background"] = []
+        try:
+            self.update_display_image()
+            stats = self._compute_result_stats()
+            self.show_result_overlay(stats)
+        except Exception:
+            pass
+
+        if show_message:
+            title = "Leaf 추가 완료" if target == "leaf" else "Scale 추가 완료"
+            messagebox.showinfo(
+                title,
+                f"SAM3 후보정으로 {target} 객체 1개를 추가했습니다.\n"
+                f"신규 면적: {int(picked['new_area'])} px\n"
+                f"점수: {float(picked['score']):.3f}\n"
+                f"시드 포함: +{int(picked.get('pos_hits', 0))}, -{int(picked.get('neg_hits', 0))}"
+            )
+            self._safe_refocus()
+        return True
+
+    def _reset_overlay_resize_cache(self):
+        """분석 결과 갱신 직후 오버레이 리사이즈 캐시 초기화."""
+        try:
+            if hasattr(self, "_resize_cache"):
+                self._resize_cache.clear()
+            if hasattr(self, "_cache_version"):
+                self._cache_version += 1
+        except Exception:
+            pass
+    def analyze_image(self, forced: bool = False, show_message: bool = True, show_overlay: bool = True) -> bool:
+        """호환용 엔트리포인트: 고급 분석 제거 후 SAM3 분석으로 위임."""
+        return self.mixed_analyze_sam3(show_message=show_message, show_overlay=show_overlay)
+
+    def mixed_analyze_sam3(self, show_message: bool = True, show_overlay: bool = True) -> bool:
         """SAM3 기반 혼합 분석"""
         print("mixed_analyze_sam3() 시작")
+        self._last_analysis_error = None
         if self.original_image is None:
-            messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
-            self._safe_refocus()
-            return
+            self._last_analysis_error = "image_not_loaded"
+            if show_message:
+                messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
+                self._safe_refocus()
+            return False
         if getattr(self, 'is_analyzing', False):
-            return
+            self._last_analysis_error = "analyze_in_progress"
+            return False
+        success = False
         self.is_analyzing = True
         try:
             if hasattr(self, 'sam3_analyze_button') and self.sam3_analyze_button:
@@ -395,14 +633,16 @@ class LeafAnalyzer:
             )
             segments_count = len(segments)
             if not segments:
-                messagebox.showwarning(
-                    "SAM3 결과 없음",
-                    "유효한 마스크가 없습니다.\n"
-                    "• 키워드(프롬프트)를 변경하거나\n"
-                    "• 점수 임계값을 낮춰보세요."
-                )
-                self._safe_refocus()
-                return
+                self._last_analysis_error = "sam3_no_segments"
+                if show_message:
+                    messagebox.showwarning(
+                        "SAM3 결과 없음",
+                        "유효한 마스크가 없습니다.\n"
+                        "• 키워드(프롬프트)를 변경하거나\n"
+                        "• 점수 임계값을 낮춰보세요."
+                    )
+                    self._safe_refocus()
+                return False
 
             h, w = img.shape[:2]
             instance_labels = np.zeros((h, w), dtype=np.int32)
@@ -487,14 +727,16 @@ class LeafAnalyzer:
                             break
 
                 if len(leaf_objects) == 0:
-                    messagebox.showwarning(
-                        "SAM3 결과 없음",
-                        f"면적 기준을 만족하는 객체가 없습니다.\n"
-                        f"현재 최소 면적: {min_area}px\n"
-                        f"검출 마스크 수: {segments_count}"
-                    )
-                    self._safe_refocus()
-                    return
+                    self._last_analysis_error = "sam3_no_objects_after_filter"
+                    if show_message:
+                        messagebox.showwarning(
+                            "SAM3 결과 없음",
+                            f"면적 기준을 만족하는 객체가 없습니다.\n"
+                            f"현재 최소 면적: {min_area}px\n"
+                            f"검출 마스크 수: {segments_count}"
+                        )
+                        self._safe_refocus()
+                    return False
 
             # Scale 마스크 (SAM3 텍스트 프롬프트 기반)
             scale_color = getattr(self, 'scale_color_var', None)
@@ -557,29 +799,36 @@ class LeafAnalyzer:
                 "sam3_min_area_used": min_area_used,
                 "sam3_min_area_relaxed": relaxed,
             }
+            self._reset_overlay_resize_cache()
 
             # 즉시 오버레이 표시
             stats = self._compute_result_stats()
-            self.show_result_overlay(stats)
+            if show_overlay:
+                self.show_result_overlay(stats)
             # 결과 메시지 표시
-            message = self._build_analysis_result_message(stats)
-            if relaxed:
-                message += f"\n\n[안내] 최소 면적 기준을 {min_area_used}px로 완화했습니다."
-            messagebox.showinfo("분석 결과", message)
-            self._safe_refocus()
+            if show_message:
+                message = self._build_analysis_result_message(stats)
+                if relaxed:
+                    message += f"\n\n[안내] 최소 면적 기준을 {min_area_used}px로 완화했습니다."
+                messagebox.showinfo("분석 결과", message)
+                self._safe_refocus()
+            success = True
             print(f"혼합 분석 완료: {len(leaf_objects)}개 잎 검출")
+            return True
         except Exception as e:
-            messagebox.showerror(
-                "SAM3 오류",
-                "SAM3 추론 실패:\n"
-                f"{e}\n\n"
-                "확인 사항:\n"
-                "• PR #173 브랜치 적용 여부\n"
-                "• MPS fallback 활성화(PYTORCH_ENABLE_MPS_FALLBACK=1)\n"
-                "• einops/pycocotools 설치"
-            )
-            self._safe_refocus()
-            return
+            self._last_analysis_error = f"sam3_error: {e}"
+            if show_message:
+                messagebox.showerror(
+                    "SAM3 오류",
+                    "SAM3 추론 실패:\n"
+                    f"{e}\n\n"
+                    "확인 사항:\n"
+                    "• PR #173 브랜치 적용 여부\n"
+                    "• MPS fallback 활성화(PYTORCH_ENABLE_MPS_FALLBACK=1)\n"
+                    "• einops/pycocotools 설치"
+                )
+                self._safe_refocus()
+            return False
         finally:
             self.is_analyzing = False
             try:
@@ -587,66 +836,21 @@ class LeafAnalyzer:
                     self.sam3_analyze_button.configure(state="normal")
             except Exception:
                 pass
+        return success
         
     # 구형 색상 모델 마스크 생성 함수 제거됨
 
-    def preview_analysis(self):
-        """실시간 미리보기 (GrabCut 결과)"""
-        if not hasattr(self, 'preview_enabled') or not self.preview_enabled.get():
-            return
-            
-        if self.original_image is None:
-            return
-            
-        print("실시간 미리보기 업데이트 중...")
-        
-        try:
-            # 선택된 세그멘테이션으로 마스크 생성
-            leaf_mask = self.generate_leaf_mask()
-            
-            if leaf_mask is None or np.sum(leaf_mask) == 0:
-                print("시드가 부족하거나 마스크가 비어있어 미리보기를 건너뜁니다.")
-                return
-            
-            print(f"생성된 마스크: {np.sum(leaf_mask)}픽셀")
-            
-            processed_mask = leaf_mask
-            print(f"후처리 후 마스크: {np.sum(processed_mask)}픽셀")
-            
-            # Scale 마스크 생성 (시드가 있을 때만)
-            scale_seeds = self.seed_manager.seeds.get("scale", [])
-            if len(scale_seeds) > 0:
-                print(f"   → 실시간 미리보기: Scale seed {len(scale_seeds)}개 검출")
-                scale_mask = self._generate_scale_mask_from_seeds(scale_seeds)
-            else:
-                print("   → 실시간 미리보기: Scale seed 없음 - Scale 검출 스킵")
-                scale_mask = None
-            
-            # 미리보기 오버레이 생성 및 디버그
-            print("미리보기 오버레이 생성 시작...")
-            preview_overlay = self.create_analysis_overlay(processed_mask, scale_mask)
-            
-            if preview_overlay is not None:
-                print(f"오버레이 이미지 크기: {preview_overlay.shape}")
-            
-            # 캔버스에 표시
-            self.show_preview_overlay(preview_overlay)
-            
-            print("실시간 미리보기 업데이트 완료!")
-            
-        except Exception as e:
-            print(f"미리보기 업데이트 실패: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def basic_analyze(self):
+    def basic_analyze(self, show_message: bool = True, show_overlay: bool = True) -> bool:
         """기본 분석: Easy Leaf Area 방식의 빠른 색상 기반 분할 (elaMac2024.py 로직)"""
         print("기본 분석 (elaMac2024.py 로직) 시작...")
+        self._last_analysis_error = None
         
         if self.original_image is None:
-            messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
-            self._safe_refocus()  # messagebox 후 포커스 관리
-            return
+            self._last_analysis_error = "image_not_loaded"
+            if show_message:
+                messagebox.showerror("오류", "먼저 이미지를 로드해주세요.")
+                self._safe_refocus()  # messagebox 후 포커스 관리
+            return False
             
         try:
             # RGB 이미지 준비 (resize 제외)
@@ -875,6 +1079,7 @@ class LeafAnalyzer:
                 "method": "basic_color_ratio",
                 "instance_labels": final_labels  # 객체 선택용 라벨맵
             }
+            self._reset_overlay_resize_cache()
             
             # 기본 분석용 인스턴스 라벨맵 저장
             self._current_instance_labels = final_labels
@@ -897,20 +1102,26 @@ class LeafAnalyzer:
                 ratGb=ratGb
             )
             
-            messagebox.showinfo("기본 분석 결과", message)
-            self._safe_refocus()  # messagebox 후 포커스 관리
+            if show_message:
+                messagebox.showinfo("기본 분석 결과", message)
+                self._safe_refocus()  # messagebox 후 포커스 관리
             
             # 결과 시각화
-            self.show_result_overlay()
+            if show_overlay:
+                self.show_result_overlay()
             
             print(f"기본 분석 완료: {len(leaf_objects)}개 잎 검출")
+            return True
             
         except Exception as e:
             print(f"기본 분석 실패: {e}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("오류", f"기본 분석 중 오류가 발생했습니다:\n{e}")
-            self._safe_refocus()  # messagebox 후 포커스 관리
+            self._last_analysis_error = f"basic_analysis_error: {e}"
+            if show_message:
+                messagebox.showerror("오류", f"기본 분석 중 오류가 발생했습니다:\n{e}")
+                self._safe_refocus()  # messagebox 후 포커스 관리
+            return False
 
     def show_analysis_results(self, show_message: bool = True):
         """분석 결과 표시"""

@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 .mamba/
 .env
+.leaf_analyzer_ui_prefs.json
 
 # Local assets & outputs
 *.jpg
@@ -23,6 +24,7 @@ __pycache__/
 exports/
 output/
 outputs/
+legacy/
 
 # SAM3 repo는 포함
 !sam3/

@@ -5,6 +5,7 @@ Export Utilities for Advanced Leaf Analyzer
 Export를 위한 유틸리티 함수들 (OBB, Polygon, RLE 등)
 """
 
+import os
 import cv2
 import numpy as np
 from typing import List
@@ -12,6 +13,51 @@ from typing import List
 
 class ExportUtils:
     """Export 유틸리티 믹스인 클래스"""
+
+    def _imread_unicode(self, path: str, flags: int = cv2.IMREAD_COLOR):
+        """유니코드 경로 안전 이미지 로드.
+
+        Windows에서 OpenCV가 비ASCII 경로를 직접 처리하지 못하는 경우를 대비해
+        `np.fromfile + cv2.imdecode` 폴백을 사용한다.
+        """
+        p = os.fspath(path)
+        try:
+            img = cv2.imread(p, flags)
+            if img is not None:
+                return img
+        except Exception:
+            pass
+        try:
+            data = np.fromfile(p, dtype=np.uint8)
+            if data.size == 0:
+                return None
+            return cv2.imdecode(data, flags)
+        except Exception:
+            return None
+
+    def _imwrite_unicode(self, path: str, image: np.ndarray, params=None) -> bool:
+        """유니코드 경로 안전 이미지 저장.
+
+        OpenCV 직접 저장이 실패하면 `cv2.imencode + ndarray.tofile`로 폴백한다.
+        """
+        p = os.fspath(path)
+        try:
+            ok = cv2.imwrite(p, image) if params is None else cv2.imwrite(p, image, params)
+            if bool(ok):
+                return True
+        except Exception:
+            pass
+        try:
+            ext = os.path.splitext(p)[1]
+            if not ext:
+                ext = ".png"
+            ok, encoded = cv2.imencode(ext, image) if params is None else cv2.imencode(ext, image, params)
+            if not ok:
+                return False
+            encoded.tofile(p)
+            return True
+        except Exception:
+            return False
 
     def _bbox_from_mask(self, mask: np.ndarray):
         ys, xs = np.where(mask)
@@ -251,5 +297,4 @@ class ExportUtils:
         if not self._reasonable_box(quad):
             quad = self._aabb(hull)
         return quad.astype(float)
-
 

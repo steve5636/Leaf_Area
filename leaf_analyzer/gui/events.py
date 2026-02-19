@@ -175,19 +175,44 @@ class EventHandlers:
             # 이미지 경계 확인
             h, w = self.original_image.shape[:2]
             if 0 <= orig_x < w and 0 <= orig_y < h:
+                # 포인트 입력 모드가 꺼져 있으면 클릭 무시 (오버레이 유지)
+                seed_edit_enabled = False
+                try:
+                    if hasattr(self, "seed_edit_enabled_var"):
+                        seed_edit_enabled = bool(self.seed_edit_enabled_var.get())
+                except Exception:
+                    seed_edit_enabled = False
+                if not seed_edit_enabled:
+                    self._log("포인트 입력 모드 비활성화 - 클릭 무시")
+                    return
+
                 # seed_mode 확인
-                if hasattr(self, 'seed_mode') and CTK_AVAILABLE:
-                    current_mode = self.seed_mode.get()
-                    self._log(f" 시드 모드: {current_mode}")
+                if hasattr(self, 'seed_mode'):
+                    try:
+                        current_mode = str(self.seed_mode.get()).strip().lower()
+                    except Exception:
+                        current_mode = "leaf"
                 else:
                     current_mode = "leaf"
-                    self._log(f" 기본 시드 모드: {current_mode}")
-                    
+                if current_mode not in {"leaf", "scale", "background"}:
+                    current_mode = "leaf"
+                self._log(f" 시드 모드: {current_mode}")
+
+                if hasattr(self, "seed_manager") and hasattr(self.seed_manager, "seeds"):
+                    if current_mode not in self.seed_manager.seeds:
+                        self.seed_manager.seeds[current_mode] = []
                 self.seed_manager.current_class = current_mode
                 self.seed_manager.add_seed(orig_x, orig_y)
                 
-                # 표시 업데이트 (시드 마커만 표시)
-                self.update_display_image()
+                # 표시 업데이트: 분석 결과가 있으면 오버레이 유지, 없으면 기본 표시
+                if self.analysis_results is not None:
+                    try:
+                        stats = self._compute_result_stats()
+                        self.show_result_overlay(stats)
+                    except Exception:
+                        self.show_result_overlay()
+                else:
+                    self.update_display_image()
                 
                 # 시드 클릭 시에는 미리보기 업데이트 하지 않음 (성능 향상)
                 self._log(f"{current_mode} 시드 추가됨: ({orig_x}, {orig_y})")
@@ -211,10 +236,17 @@ class EventHandlers:
         # 이벤트가 None이면 마지막 시드 제거 (기존 기능 유지)
         if event is None:
             self._deactivate_delete_mode()
-            current_mode = self.seed_mode.get() if CTK_AVAILABLE else "leaf"
+            current_mode = self.seed_mode.get() if hasattr(self, "seed_mode") else "leaf"
             self.seed_manager.current_class = current_mode
             self.seed_manager.remove_last_seed()
-            self.update_display_image()
+            if self.analysis_results is not None:
+                try:
+                    stats = self._compute_result_stats()
+                    self.show_result_overlay(stats)
+                except Exception:
+                    self.show_result_overlay()
+            else:
+                self.update_display_image()
             return
             
         coords = self._event_to_orig_coords(event)
@@ -226,7 +258,7 @@ class EventHandlers:
         h, w = self.original_image.shape[:2]
         if 0 <= orig_x < w and 0 <= orig_y < h:
             self._deactivate_delete_mode()
-            current_mode = self.seed_mode.get() if CTK_AVAILABLE else "leaf"
+            current_mode = self.seed_mode.get() if hasattr(self, "seed_mode") else "leaf"
             self.seed_manager.current_class = current_mode
             
             # 모든 클래스에서 가장 가까운 시드 찾기
@@ -241,15 +273,14 @@ class EventHandlers:
             
             if seed_removed:
                 self._log(f"{removed_from_class} 시드가 제거되었습니다.")
-                
-                # 마스크 캐시 무효화 (시드 변경)
-                self._invalidate_mask_cache()
-                
-                # 객체 삭제 시스템 초기화 (시드 변경 시)
-                self._deleted_objects = set()
-                self._current_instance_labels = None
-                
-                self.update_display_image()
+                if self.analysis_results is not None:
+                    try:
+                        stats = self._compute_result_stats()
+                        self.show_result_overlay(stats)
+                    except Exception:
+                        self.show_result_overlay()
+                else:
+                    self.update_display_image()
                 
                 # 시드 제거 시에도 미리보기 업데이트 하지 않음 (성능 향상)
                 self._log("  → 색상 모델 재구축이 필요합니다.")
@@ -352,25 +383,25 @@ class EventHandlers:
 
     def clear_current_seeds(self):
         """현재 선택된 클래스의 시드 초기화"""
-        current_mode = self.seed_mode.get() if CTK_AVAILABLE else "leaf"
+        current_mode = self.seed_mode.get() if hasattr(self, "seed_mode") else "leaf"
         self._deactivate_delete_mode()
         self.seed_manager.clear_seeds(current_mode)
-        
-        # 마스크 캐시 무효화 (시드 초기화)
-        self._invalidate_mask_cache()
-        
-        # 슈퍼픽셀 세그먼트 ID도 초기화
-        if current_mode in self.seed_segment_ids:
-            self.seed_segment_ids[current_mode].clear()
-            print(f"{current_mode} 시드와 세그먼트 ID 초기화")
-        
+
+        # 분석 결과가 있으면 시드 초기화 후 결과 오버레이를 다시 표시
+        # (시드 클릭으로 사라진 오버레이 복구)
         self.update_display_image()
+        if self.analysis_results is not None:
+            try:
+                stats = self._compute_result_stats()
+                self.show_result_overlay(stats)
+            except Exception:
+                self.show_result_overlay()
 
     def undo_last_seed(self):
         """마지막 시드 제거"""
         self.on_canvas_right_click(None)
     
-    # 색상 모델 구축 기능 제거됨 (GrabCut 사용)
+    # 레거시 색상 모델 구축 기능 제거됨
 
     def _deactivate_delete_mode(self):
         """시드 변경 시 삭제 모드 강제 해제"""
