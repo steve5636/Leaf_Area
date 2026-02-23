@@ -135,10 +135,10 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         }
         
         self.seed_manager = SeedManager()
-        # 후보정 시드용 background 버킷 포함 보장
+        # 후보정 시드 버킷(leaf/plant/scale/background) 보장
         if not isinstance(getattr(self.seed_manager, "seeds", None), dict):
             self.seed_manager.seeds = {}
-        for cls_name in ("leaf", "scale", "background"):
+        for cls_name in ("leaf", "plant", "scale", "background"):
             if cls_name not in self.seed_manager.seeds or not isinstance(self.seed_manager.seeds.get(cls_name), list):
                 self.seed_manager.seeds[cls_name] = []
         # 고급 색상 유틸 미사용
@@ -202,6 +202,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         self.batch_review_index: int = -1
         self.batch_review_active: bool = False
         self.batch_review_output_root: Optional[str] = None
+        self.batch_review_save_per_image: bool = False
+        self.batch_review_export_yolo_coco: bool = False
         self._batch_review_last_saved_index: int = -1
 
     def _cached_resize_mask(self, mask: np.ndarray, target_size: tuple, mask_id: str = None) -> np.ndarray:
@@ -310,13 +312,25 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             # 1. Return 키 일시 차단 (500ms)
             self._block_return_key = True
             
-            # 2. 캔버스로 포커스 이동 (버튼 포커스 해제)
+            # 2. 루트/캔버스로 포커스 이동 (버튼 포커스 해제)
+            if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+                try:
+                    self.root.focus_set()
+                except Exception:
+                    pass
+
             if hasattr(self, 'canvas') and self.canvas and self.canvas.winfo_exists():
                 self.canvas.focus_set()
             
             # 3. 이벤트 큐 처리
             if hasattr(self, 'root') and self.root and self.root.winfo_exists():
                 self.root.update_idletasks()
+                # macOS에서 대화상자/팝업 닫힌 뒤 비활성 창 상태가 남는 경우 보정
+                try:
+                    if self.root.tk.call("tk", "windowingsystem") == "aqua":
+                        self.root.after_idle(self.root.focus_force)
+                except Exception:
+                    pass
             
             # 4. 500ms 후 Return 키 차단 해제
             def _unblock():
@@ -909,7 +923,7 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         
         # 시드 데이터 초기화
         if hasattr(self, 'seed_manager') and self.seed_manager:
-            self.seed_manager.seeds = {"leaf": [], "scale": [], "background": []}
+            self.seed_manager.seeds = {"leaf": [], "plant": [], "scale": [], "background": []}
             print("시드 데이터 초기화 완료")
         
         # 분석 결과 초기화
@@ -1060,6 +1074,12 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         # 간단 상태 갱신
         snap = item.get("snapshot", {})
         ar = snap.get("analysis_results", None) if isinstance(snap, dict) else None
+        deleted_leaf = set()
+        if isinstance(snap, dict):
+            try:
+                deleted_leaf = {int(x) for x in snap.get("deleted_leaf", set())}
+            except Exception:
+                deleted_leaf = set()
         status = "OK"
         reasons = []
         if ar is None:
@@ -1067,7 +1087,12 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             reasons.append("no_analysis_result")
         else:
             objs = ar.get("objects", []) if isinstance(ar, dict) else []
-            if len(objs) <= 0:
+            active_leaf_count = 0
+            try:
+                active_leaf_count = len([obj for obj in objs if int(obj.get("id", 0)) not in deleted_leaf])
+            except Exception:
+                active_leaf_count = len(objs)
+            if active_leaf_count <= 0:
                 status = "NEEDS_REVIEW"
                 reasons.append("no_leaf_objects")
         item["status"] = status
@@ -1107,7 +1132,7 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 pass
         self._apply_inference_resize(float(div))
 
-        self.seed_manager.seeds = {"leaf": [], "scale": [], "background": []}
+        self.seed_manager.seeds = {"leaf": [], "plant": [], "scale": [], "background": []}
         self._deleted_objects = set()
         self._deleted_scale_objects = set()
         self.analysis_results = None
@@ -1161,53 +1186,69 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         self._batch_review_store_current()
         try:
             self._save_current_review_item_to_disk()
-        except Exception:
-            pass
+        except Exception as e:
+            messagebox.showerror("배치 리뷰", f"현재 저장 중 오류가 발생했습니다:\n{e}")
+            self._safe_refocus()
+            return
         self._batch_review_last_saved_index = int(getattr(self, "batch_review_index", -1))
         self._update_batch_review_ui()
         messagebox.showinfo("배치 리뷰", "현재 이미지 수정 결과를 배치 리뷰 세션에 저장했습니다.")
         self._safe_refocus()
 
-    def _save_current_review_item_to_disk(self):
-        out_root = getattr(self, "batch_review_output_root", None)
-        if not out_root:
-            return
-        idx = int(getattr(self, "batch_review_index", -1))
-        items = getattr(self, "batch_review_items", [])
-        if idx < 0 or idx >= len(items):
-            return
-        item = items[idx]
+    def _extract_review_item_export_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
         image_name = str(item.get("image_name", "image"))
-        stem = Path(image_name).stem
-
-        reports_dir = os.path.join(out_root, "reports")
-        overlays_dir = os.path.join(out_root, "overlays")
-        per_image_dir = os.path.join(out_root, "per_image")
-        os.makedirs(reports_dir, exist_ok=True)
-        os.makedirs(overlays_dir, exist_ok=True)
-
-        # summary
-        snap = item.get("snapshot", {}) if isinstance(item.get("snapshot", {}), dict) else {}
-        ar = snap.get("analysis_results", None)
+        image_path = str(item.get("image_path", ""))
+        method = str(item.get("mode", ""))
         status = str(item.get("status", "OK"))
         reasons = item.get("reasons", [])
         if not isinstance(reasons, list):
             reasons = [str(reasons)]
+        else:
+            reasons = [str(r) for r in reasons]
 
+        try:
+            processing_ms = round(float(item.get("processing_ms", 0.0) or 0.0), 2)
+        except Exception:
+            processing_ms = 0.0
+
+        snap = item.get("snapshot", {})
+        if not isinstance(snap, dict):
+            snap = {}
+        ar = snap.get("analysis_results", None)
+        try:
+            deleted_leaf = {int(x) for x in snap.get("deleted_leaf", set())}
+        except Exception:
+            deleted_leaf = set()
+        try:
+            deleted_scale = {int(x) for x in snap.get("deleted_scale", set())}
+        except Exception:
+            deleted_scale = set()
+
+        leaf_rows: List[Dict[str, Any]] = []
+        scale_rows: List[Dict[str, Any]] = []
         leaf_count = 0
         scale_count = 0
         leaf_area_px = 0
         scale_area_px = 0
         ppcm2 = None
-        leaf_rows = []
-        scale_rows = []
 
         if isinstance(ar, dict):
             objs = ar.get("objects", []) or []
-            leaf_count = int(len(objs))
-            leaf_area_px = int(ar.get("total_leaf_area_pixels", 0) or 0)
-            ppcm2 = ar.get("pixels_per_cm2", None)
+            active_leaf_objs = []
             for obj in objs:
+                try:
+                    oid = int(obj.get("id", 0))
+                except Exception:
+                    oid = 0
+                if oid in deleted_leaf:
+                    continue
+                active_leaf_objs.append(obj)
+
+            leaf_count = int(len(active_leaf_objs))
+            leaf_area_px = int(sum(int(obj.get("area", 0) or 0) for obj in active_leaf_objs))
+            ppcm2 = ar.get("pixels_per_cm2", None)
+
+            for obj in active_leaf_objs:
                 cx, cy = obj.get("center", (0.0, 0.0))
                 leaf_rows.append({
                     "object_type": "leaf",
@@ -1225,7 +1266,7 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 labels = np.asarray(scl)
                 for sid in np.unique(labels):
                     sid_i = int(sid)
-                    if sid_i <= 0:
+                    if sid_i <= 0 or sid_i in deleted_scale:
                         continue
                     m = (labels == sid_i)
                     a = int(np.sum(m))
@@ -1249,6 +1290,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 if sm.size > 0 and int(np.sum(sm)) > 0:
                     num_labels, labels = cv2.connectedComponents(sm, connectivity=8)
                     for sid in range(1, int(num_labels)):
+                        if sid in deleted_scale:
+                            continue
                         m = (labels == sid)
                         a = int(np.sum(m))
                         if a <= 0:
@@ -1266,55 +1309,351 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                             "center_x": cx,
                             "center_y": cy,
                         })
+
             scale_count = int(len(scale_rows))
             scale_area_px = int(sum(r.get("area_pixels", 0) or 0 for r in scale_rows))
 
-        # CSV
-        if os.path.isdir(per_image_dir):
-            csv_path = os.path.join(per_image_dir, f"{stem}.csv")
-            json_path = os.path.join(per_image_dir, f"{stem}.json")
-        else:
-            csv_path = os.path.join(reports_dir, f"{stem}_review.csv")
-            json_path = os.path.join(reports_dir, f"{stem}_review.json")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["key", "value"])
-            writer.writerow(["image_name", image_name])
-            writer.writerow(["status", status])
-            writer.writerow(["reasons", "|".join(reasons)])
-            writer.writerow(["leaf_count", leaf_count])
-            writer.writerow(["scale_count", scale_count])
-            writer.writerow(["leaf_area_pixels", leaf_area_px])
-            writer.writerow(["scale_area_pixels", scale_area_px])
-            writer.writerow(["pixels_per_cm2", ppcm2 if ppcm2 is not None else ""])
-            writer.writerow([])
-            writer.writerow(["object_type", "object_id", "area_pixels", "length_pixels", "width_pixels", "perimeter_pixels", "center_x", "center_y"])
-            for row in leaf_rows + scale_rows:
-                writer.writerow([
-                    row.get("object_type"),
-                    row.get("object_id"),
-                    row.get("area_pixels"),
-                    row.get("length_pixels", ""),
-                    row.get("width_pixels", ""),
-                    row.get("perimeter_pixels", ""),
-                    row.get("center_x"),
-                    row.get("center_y"),
-                ])
+        has_scale_ref = False
+        try:
+            has_scale_ref = int(scale_count) > 0 and ppcm2 is not None and float(ppcm2) > 0
+        except Exception:
+            has_scale_ref = False
+        leaf_area_cm2 = (float(leaf_area_px) / float(ppcm2)) if has_scale_ref else 0.0
+        scale_area_cm2 = (float(scale_area_px) / float(ppcm2)) if has_scale_ref else 0.0
+        px_per_cm = (float(ppcm2) ** 0.5) if has_scale_ref else None
 
-        # JSON
-        payload = {
+        # JSON/CSV 일관성을 위해 객체별 cm²도 함께 계산
+        for row in leaf_rows:
+            try:
+                area_px = float(row.get("area_pixels", 0) or 0)
+            except Exception:
+                area_px = 0.0
+            row["area_cm2"] = round((area_px / float(ppcm2)) if has_scale_ref else 0.0, 6)
+            try:
+                row["length_cm"] = round(float(row.get("length_pixels", 0) or 0) / px_per_cm, 6) if has_scale_ref and px_per_cm else 0.0
+            except Exception:
+                row["length_cm"] = None if has_scale_ref else 0.0
+            try:
+                row["width_cm"] = round(float(row.get("width_pixels", 0) or 0) / px_per_cm, 6) if has_scale_ref and px_per_cm else 0.0
+            except Exception:
+                row["width_cm"] = None if has_scale_ref else 0.0
+            try:
+                row["perimeter_cm"] = round(float(row.get("perimeter_pixels", 0) or 0) / px_per_cm, 6) if has_scale_ref and px_per_cm else 0.0
+            except Exception:
+                row["perimeter_cm"] = None if has_scale_ref else 0.0
+        for row in scale_rows:
+            try:
+                area_px = float(row.get("area_pixels", 0) or 0)
+            except Exception:
+                area_px = 0.0
+            row["area_cm2"] = round((area_px / float(ppcm2)) if has_scale_ref else 0.0, 6)
+            # Scale row에는 길이/너비/둘레가 없을 수 있으므로 None 허용
+            try:
+                lp = row.get("length_pixels", None)
+                row["length_cm"] = (round(float(lp) / px_per_cm, 6) if (lp is not None and has_scale_ref and px_per_cm) else (0.0 if not has_scale_ref else None))
+            except Exception:
+                row["length_cm"] = None if has_scale_ref else 0.0
+            try:
+                wp = row.get("width_pixels", None)
+                row["width_cm"] = (round(float(wp) / px_per_cm, 6) if (wp is not None and has_scale_ref and px_per_cm) else (0.0 if not has_scale_ref else None))
+            except Exception:
+                row["width_cm"] = None if has_scale_ref else 0.0
+            try:
+                pp = row.get("perimeter_pixels", None)
+                row["perimeter_cm"] = (round(float(pp) / px_per_cm, 6) if (pp is not None and has_scale_ref and px_per_cm) else (0.0 if not has_scale_ref else None))
+            except Exception:
+                row["perimeter_cm"] = None if has_scale_ref else 0.0
+
+        summary = {
             "image_name": image_name,
             "status": status,
-            "reasons": reasons,
-            "leaf_count": leaf_count,
-            "scale_count": scale_count,
-            "leaf_area_pixels": leaf_area_px,
-            "scale_area_pixels": scale_area_px,
-            "pixels_per_cm2": ppcm2,
-            "objects": leaf_rows + scale_rows,
+            "reasons": "|".join(reasons),
+            "method": method,
+            "leaf_count": int(leaf_count),
+            "scale_count": int(scale_count),
+            "leaf_area_pixels": int(leaf_area_px),
+            "leaf_area_cm2": round(float(leaf_area_cm2), 6),
+            "scale_area_pixels": int(scale_area_px),
+            "scale_area_cm2": round(float(scale_area_cm2), 6),
+            "pixels_per_cm2": ppcm2 if ppcm2 is not None else "",
+            "processing_ms": processing_ms,
         }
-        with open(json_path, "w", encoding="utf-8") as f:
+
+        object_rows = []
+        for row in leaf_rows + scale_rows:
+            object_rows.append({
+                "image_name": image_name,
+                "object_type": row.get("object_type"),
+                "object_id": row.get("object_id"),
+                "area_pixels": row.get("area_pixels"),
+                "area_cm2": row.get("area_cm2", 0.0),
+                "length_pixels": row.get("length_pixels"),
+                "length_cm": row.get("length_cm"),
+                "width_pixels": row.get("width_pixels"),
+                "width_cm": row.get("width_cm"),
+                "perimeter_pixels": row.get("perimeter_pixels"),
+                "perimeter_cm": row.get("perimeter_cm"),
+                "center_x": row.get("center_x"),
+                "center_y": row.get("center_y"),
+                "status": status,
+            })
+
+        json_item = {
+            "image_name": image_name,
+            "image_path": image_path,
+            "status": status,
+            "reasons": reasons,
+            "method": method,
+            "leaf_count": int(leaf_count),
+            "scale_count": int(scale_count),
+            "leaf_area_pixels": int(leaf_area_px),
+            "leaf_area_cm2": round(float(leaf_area_cm2), 6),
+            "scale_area_pixels": int(scale_area_px),
+            "scale_area_cm2": round(float(scale_area_cm2), 6),
+            "pixels_per_cm2": ppcm2,
+            "processing_ms": processing_ms,
+            "leaf_objects": leaf_rows,
+            "scale_objects": scale_rows,
+        }
+
+        return {
+            "summary": summary,
+            "leaf_rows": leaf_rows,
+            "scale_rows": scale_rows,
+            "object_rows": object_rows,
+            "json_item": json_item,
+        }
+
+    def _rewrite_batch_reports_from_review_items(self):
+        out_root = getattr(self, "batch_review_output_root", None)
+        items = getattr(self, "batch_review_items", [])
+        if not out_root or not isinstance(items, list) or len(items) == 0:
+            return
+
+        reports_dir = os.path.join(out_root, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+
+        summary_rows = []
+        object_rows = []
+        json_items = []
+        needs_review_rows = []
+
+        for item in items:
+            data = self._extract_review_item_export_data(item)
+            summary = data.get("summary", {})
+            summary_rows.append(summary)
+            object_rows.extend(data.get("object_rows", []))
+            json_items.append(data.get("json_item", {}))
+            if str(summary.get("status", "")) == "NEEDS_REVIEW":
+                needs_review_rows.append(summary)
+
+        summary_csv_path = os.path.join(reports_dir, "batch_summary.csv")
+        with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "image_name",
+                    "status",
+                    "reasons",
+                    "method",
+                    "leaf_count",
+                    "scale_count",
+                    "leaf_area_pixels",
+                    "leaf_area_cm2",
+                    "scale_area_pixels",
+                    "scale_area_cm2",
+                    "pixels_per_cm2",
+                    "processing_ms",
+                ],
+            )
+            writer.writeheader()
+            for row in summary_rows:
+                writer.writerow(row)
+
+        objects_csv_path = os.path.join(reports_dir, "batch_objects.csv")
+        with open(objects_csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "image_name",
+                    "object_type",
+                    "object_id",
+                    "area_pixels",
+                    "area_cm2",
+                    "length_pixels",
+                    "length_cm",
+                    "width_pixels",
+                    "width_cm",
+                    "perimeter_pixels",
+                    "perimeter_cm",
+                    "center_x",
+                    "center_y",
+                    "status",
+                ],
+            )
+            writer.writeheader()
+            for row in object_rows:
+                writer.writerow(row)
+
+        review_csv_path = os.path.join(reports_dir, "needs_review.csv")
+        if needs_review_rows:
+            with open(review_csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "image_name",
+                        "status",
+                        "reasons",
+                        "method",
+                        "leaf_count",
+                        "scale_count",
+                        "leaf_area_pixels",
+                        "leaf_area_cm2",
+                        "scale_area_pixels",
+                        "scale_area_cm2",
+                        "pixels_per_cm2",
+                        "processing_ms",
+                    ],
+                )
+                writer.writeheader()
+                for row in needs_review_rows:
+                    writer.writerow(row)
+        else:
+            try:
+                if os.path.exists(review_csv_path):
+                    os.remove(review_csv_path)
+            except Exception:
+                pass
+
+        mode_set = {str(r.get("method", "")).strip() for r in summary_rows if str(r.get("method", "")).strip()}
+        if len(mode_set) == 1:
+            analysis_mode = next(iter(mode_set))
+        elif len(mode_set) > 1:
+            analysis_mode = "mixed"
+        else:
+            analysis_mode = ""
+
+        batch_json_path = os.path.join(reports_dir, "batch_results.json")
+        payload = {
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "input_dir": str(Path(out_root).parent),
+            "analysis_mode": analysis_mode,
+            "total_images": len(summary_rows),
+            "needs_review_count": len(needs_review_rows),
+            "save_per_image": bool(getattr(self, "batch_review_save_per_image", False)),
+            "export_yolo_coco": bool(getattr(self, "batch_review_export_yolo_coco", False)),
+            "items": json_items,
+        }
+        with open(batch_json_path, "w", encoding="utf-8") as f:
             json.dump(self._json_safe(payload), f, ensure_ascii=False, indent=2)
+
+    def _save_current_review_item_to_disk(self):
+        out_root = getattr(self, "batch_review_output_root", None)
+        if not out_root:
+            return
+        idx = int(getattr(self, "batch_review_index", -1))
+        items = getattr(self, "batch_review_items", [])
+        if idx < 0 or idx >= len(items):
+            return
+        item = items[idx]
+        image_name = str(item.get("image_name", "image"))
+        stem = Path(image_name).stem
+
+        reports_dir = os.path.join(out_root, "reports")
+        overlays_dir = os.path.join(out_root, "overlays")
+        per_image_dir = os.path.join(out_root, "per_image")
+        os.makedirs(reports_dir, exist_ok=True)
+        os.makedirs(overlays_dir, exist_ok=True)
+
+        data = self._extract_review_item_export_data(item)
+        summary = data.get("summary", {})
+        leaf_rows = data.get("leaf_rows", [])
+        scale_rows = data.get("scale_rows", [])
+        json_item = data.get("json_item", {})
+        image_name = str(summary.get("image_name", image_name))
+
+        # 현재 아이템 요약 필드를 동기화해 이후 통합 리포트 갱신 시 일관성 유지
+        item["status"] = str(summary.get("status", item.get("status", "OK")))
+        item["reasons"] = list(json_item.get("reasons", item.get("reasons", [])))
+        item["leaf_count"] = int(summary.get("leaf_count", 0) or 0)
+        item["scale_count"] = int(summary.get("scale_count", 0) or 0)
+        item["leaf_area_pixels"] = int(summary.get("leaf_area_pixels", 0) or 0)
+        item["scale_area_pixels"] = int(summary.get("scale_area_pixels", 0) or 0)
+        item["pixels_per_cm2"] = json_item.get("pixels_per_cm2", None)
+        item["processing_ms"] = float(summary.get("processing_ms", 0.0) or 0.0)
+
+        # CSV/JSON 저장 경로는 배치 시작 시 선택한 옵션을 따른다.
+        # (디렉터리 존재 여부로 판단하면 체크 해제 상태와 불일치할 수 있음)
+        save_per_image_mode = bool(getattr(self, "batch_review_save_per_image", False))
+        try:
+            if "save_per_image" in item:
+                save_per_image_mode = bool(item.get("save_per_image", save_per_image_mode))
+        except Exception:
+            pass
+
+        if save_per_image_mode:
+            os.makedirs(per_image_dir, exist_ok=True)
+            csv_path = os.path.join(per_image_dir, f"{stem}.csv")
+            json_path = os.path.join(per_image_dir, f"{stem}.json")
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["key", "value"])
+                for k in [
+                    "image_name",
+                    "status",
+                    "reasons",
+                    "method",
+                    "leaf_count",
+                    "scale_count",
+                    "leaf_area_pixels",
+                    "leaf_area_cm2",
+                    "scale_area_pixels",
+                    "scale_area_cm2",
+                    "pixels_per_cm2",
+                    "processing_ms",
+                ]:
+                    writer.writerow([k, summary.get(k, "")])
+                writer.writerow([])
+                writer.writerow([
+                    "object_type", "object_id",
+                    "area_pixels", "area_cm2",
+                    "length_pixels", "length_cm",
+                    "width_pixels", "width_cm",
+                    "perimeter_pixels", "perimeter_cm",
+                    "center_x",
+                    "center_y",
+                ])
+                for row in leaf_rows + scale_rows:
+                    writer.writerow([
+                        row.get("object_type"),
+                        row.get("object_id"),
+                        row.get("area_pixels"),
+                        row.get("area_cm2", 0.0),
+                        row.get("length_pixels", ""),
+                        row.get("length_cm", ""),
+                        row.get("width_pixels", ""),
+                        row.get("width_cm", ""),
+                        row.get("perimeter_pixels", ""),
+                        row.get("perimeter_cm", ""),
+                        row.get("center_x"),
+                        row.get("center_y"),
+                    ])
+
+            with open(json_path, "w", encoding="utf-8") as f:
+                payload = {"summary": summary, "leaf_objects": leaf_rows, "scale_objects": scale_rows}
+                json.dump(self._json_safe(payload), f, ensure_ascii=False, indent=2)
+        else:
+            # 통합 파일 모드에서는 과거 버전의 개별 review 파일을 생성하지 않는다.
+            try:
+                for pattern in ("*_review.csv", "*_review.json"):
+                    for p in Path(reports_dir).glob(pattern):
+                        try:
+                            if p.exists():
+                                p.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         # Overlay 이미지 저장
         try:
@@ -1330,6 +1669,12 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                         os.path.join(overlays_dir, f"{stem}_overlay.jpg"),
                         cv2.cvtColor(ov, cv2.COLOR_RGB2BGR),
                     )
+        except Exception:
+            pass
+
+        # 통합 리포트 갱신 (batch_summary/batch_objects/batch_results)
+        try:
+            self._rewrite_batch_reports_from_review_items()
         except Exception:
             pass
 
@@ -1368,55 +1713,69 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 save_per_image = bool(self.batch_save_per_image_var.get())
             except Exception:
                 save_per_image = False
+        export_yolo_coco = False
+        if hasattr(self, "batch_export_yolo_coco_var"):
+            try:
+                export_yolo_coco = bool(self.batch_export_yolo_coco_var.get())
+            except Exception:
+                export_yolo_coco = False
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_root = os.path.join(input_dir, f"batch_output_{timestamp}")
         reports_dir = os.path.join(out_root, "reports")
         overlays_dir = os.path.join(out_root, "overlays")
         per_image_dir = os.path.join(out_root, "per_image")
-        yolo_obb_images_dir = os.path.join(out_root, "yolo_obb", "images")
-        yolo_obb_labels_dir = os.path.join(out_root, "yolo_obb", "labels")
-        yolo_seg_images_dir = os.path.join(out_root, "yolo_seg", "images")
-        yolo_seg_labels_dir = os.path.join(out_root, "yolo_seg", "labels")
-        coco_images_dir = os.path.join(out_root, "coco", "images")
-        for d in [
-            reports_dir,
-            overlays_dir,
-            yolo_obb_images_dir,
-            yolo_obb_labels_dir,
-            yolo_seg_images_dir,
-            yolo_seg_labels_dir,
-            coco_images_dir,
-        ]:
+        yolo_obb_images_dir = None
+        yolo_obb_labels_dir = None
+        yolo_seg_images_dir = None
+        yolo_seg_labels_dir = None
+        coco_images_dir = None
+        out_dirs = [reports_dir, overlays_dir]
+        if export_yolo_coco:
+            yolo_obb_images_dir = os.path.join(out_root, "yolo_obb", "images")
+            yolo_obb_labels_dir = os.path.join(out_root, "yolo_obb", "labels")
+            yolo_seg_images_dir = os.path.join(out_root, "yolo_seg", "images")
+            yolo_seg_labels_dir = os.path.join(out_root, "yolo_seg", "labels")
+            coco_images_dir = os.path.join(out_root, "coco", "images")
+            out_dirs.extend([
+                yolo_obb_images_dir,
+                yolo_obb_labels_dir,
+                yolo_seg_images_dir,
+                yolo_seg_labels_dir,
+                coco_images_dir,
+            ])
+        for d in out_dirs:
             os.makedirs(d, exist_ok=True)
         if save_per_image:
             os.makedirs(per_image_dir, exist_ok=True)
 
-        # 클래스 파일(배치 고정)
-        with open(os.path.join(out_root, "yolo_obb", "classes.txt"), "w", encoding="utf-8") as f:
-            f.write("leaf\nunused\nscale\n")
-        with open(os.path.join(out_root, "yolo_seg", "classes.txt"), "w", encoding="utf-8") as f:
-            f.write("leaf\nunused\nscale\n")
-
         use_polygon = False
-        if hasattr(self, "use_polygon_format"):
-            try:
-                use_polygon = bool(self.use_polygon_format.get())
-            except Exception:
-                use_polygon = False
-
-        coco_data = {
-            "info": {"description": "Leaf Area Analyzer Batch Export", "version": "1.0"},
-            "licenses": [],
-            "images": [],
-            "annotations": [],
-            "categories": [
-                {"id": 0, "name": "leaf", "supercategory": "plant"},
-                {"id": 2, "name": "scale", "supercategory": "measurement"},
-            ],
-        }
+        coco_data = None
         coco_image_id = 1
         coco_ann_id = 1
+        if export_yolo_coco:
+            # 클래스 파일(배치 고정)
+            with open(os.path.join(out_root, "yolo_obb", "classes.txt"), "w", encoding="utf-8") as f:
+                f.write("leaf\nunused\nscale\n")
+            with open(os.path.join(out_root, "yolo_seg", "classes.txt"), "w", encoding="utf-8") as f:
+                f.write("leaf\nunused\nscale\n")
+
+            if hasattr(self, "use_polygon_format"):
+                try:
+                    use_polygon = bool(self.use_polygon_format.get())
+                except Exception:
+                    use_polygon = False
+
+            coco_data = {
+                "info": {"description": "Leaf Area Analyzer Batch Export", "version": "1.0"},
+                "licenses": [],
+                "images": [],
+                "annotations": [],
+                "categories": [
+                    {"id": 0, "name": "leaf", "supercategory": "plant"},
+                    {"id": 2, "name": "scale", "supercategory": "measurement"},
+                ],
+            }
 
         summary_rows = []
         object_rows = []
@@ -1480,21 +1839,35 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "leaf_count",
                     "scale_count",
                     "leaf_area_pixels",
+                    "leaf_area_cm2",
                     "scale_area_pixels",
+                    "scale_area_cm2",
                     "pixels_per_cm2",
                     "processing_ms",
                 ]:
                     writer.writerow([k, summary.get(k, "")])
                 writer.writerow([])
-                writer.writerow(["object_type", "object_id", "area_pixels", "length_pixels", "width_pixels", "perimeter_pixels", "center_x", "center_y"])
+                writer.writerow([
+                    "object_type", "object_id",
+                    "area_pixels", "area_cm2",
+                    "length_pixels", "length_cm",
+                    "width_pixels", "width_cm",
+                    "perimeter_pixels", "perimeter_cm",
+                    "center_x",
+                    "center_y",
+                ])
                 for row in leaf_objs:
                     writer.writerow([
                         "leaf",
                         row.get("object_id"),
                         row.get("area_pixels"),
+                        row.get("area_cm2", 0.0),
                         row.get("length_pixels"),
+                        row.get("length_cm"),
                         row.get("width_pixels"),
+                        row.get("width_cm"),
                         row.get("perimeter_pixels"),
+                        row.get("perimeter_cm"),
                         row.get("center_x"),
                         row.get("center_y"),
                     ])
@@ -1503,9 +1876,13 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                         "scale",
                         row.get("object_id"),
                         row.get("area_pixels"),
-                        "",
-                        "",
-                        "",
+                        row.get("area_cm2", 0.0),
+                        row.get("length_pixels", ""),
+                        row.get("length_cm", ""),
+                        row.get("width_pixels", ""),
+                        row.get("width_cm", ""),
+                        row.get("perimeter_pixels", ""),
+                        row.get("perimeter_cm", ""),
                         row.get("center_x"),
                         row.get("center_y"),
                     ])
@@ -1545,6 +1922,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 leaf_area_px = 0
                 scale_area_px = 0
                 pixels_per_cm2 = None
+                leaf_area_cm2 = 0.0
+                scale_area_cm2 = 0.0
 
                 item_json = {
                     "image_name": image_name,
@@ -1555,7 +1934,9 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "leaf_count": 0,
                     "scale_count": 0,
                     "leaf_area_pixels": 0,
+                    "leaf_area_cm2": 0.0,
                     "scale_area_pixels": 0,
+                    "scale_area_cm2": 0.0,
                     "pixels_per_cm2": None,
                     "processing_ms": 0.0,
                     "leaf_objects": [],
@@ -1594,6 +1975,14 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
     
                         scale_masks = _collect_scale_masks_current()
                         scale_count = len(scale_masks)
+                        has_scale_ref = False
+                        try:
+                            has_scale_ref = scale_count > 0 and pixels_per_cm2 is not None and float(pixels_per_cm2) > 0
+                        except Exception:
+                            has_scale_ref = False
+                        px_per_cm = (float(pixels_per_cm2) ** 0.5) if has_scale_ref else None
+                        leaf_area_cm2 = (float(leaf_area_px) / float(pixels_per_cm2)) if has_scale_ref else 0.0
+                        scale_area_cm2 = (float(scale_area_px) / float(pixels_per_cm2)) if has_scale_ref else 0.0
     
                         if leaf_count <= 0:
                             reasons.append("no_leaf_objects")
@@ -1621,14 +2010,22 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
     
                         for obj in self.analysis_results.get("objects", []):
                             cx, cy = obj.get("center", (0.0, 0.0))
+                            try:
+                                obj_area_px = float(obj.get("area", 0.0) or 0.0)
+                            except Exception:
+                                obj_area_px = 0.0
                             row = {
                                 "image_name": image_name,
                                 "object_type": "leaf",
                                 "object_id": int(obj.get("id", -1)),
-                                "area_pixels": float(obj.get("area", 0.0)),
+                                "area_pixels": obj_area_px,
+                                "area_cm2": (obj_area_px / float(pixels_per_cm2)) if (scale_count > 0 and pixels_per_cm2 is not None and float(pixels_per_cm2) > 0) else 0.0,
                                 "length_pixels": float(obj.get("length", 0.0)),
+                                "length_cm": (float(obj.get("length", 0.0)) / px_per_cm) if (has_scale_ref and px_per_cm) else 0.0,
                                 "width_pixels": float(obj.get("width", 0.0)),
+                                "width_cm": (float(obj.get("width", 0.0)) / px_per_cm) if (has_scale_ref and px_per_cm) else 0.0,
                                 "perimeter_pixels": float(obj.get("perimeter", 0.0)),
+                                "perimeter_cm": (float(obj.get("perimeter", 0.0)) / px_per_cm) if (has_scale_ref and px_per_cm) else 0.0,
                                 "center_x": float(cx),
                                 "center_y": float(cy),
                                 "status": status,
@@ -1640,14 +2037,19 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                             ys, xs = np.where(smask)
                             cx = float(np.mean(xs)) if xs.size > 0 else 0.0
                             cy = float(np.mean(ys)) if ys.size > 0 else 0.0
+                            obj_area_px = int(np.sum(smask))
                             row = {
                                 "image_name": image_name,
                                 "object_type": "scale",
                                 "object_id": int(sid),
-                                "area_pixels": int(np.sum(smask)),
+                                "area_pixels": obj_area_px,
+                                "area_cm2": (float(obj_area_px) / float(pixels_per_cm2)) if (scale_count > 0 and pixels_per_cm2 is not None and float(pixels_per_cm2) > 0) else 0.0,
                                 "length_pixels": None,
+                                "length_cm": None if has_scale_ref else 0.0,
                                 "width_pixels": None,
+                                "width_cm": None if has_scale_ref else 0.0,
                                 "perimeter_pixels": None,
+                                "perimeter_cm": None if has_scale_ref else 0.0,
                                 "center_x": cx,
                                 "center_y": cy,
                                 "status": status,
@@ -1655,8 +2057,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                             scale_rows_this.append(row)
                             object_rows.append(row)
     
-                        # YOLO OBB/Seg + COCO는 라벨 품질을 위해 OK 건만 기록
-                        if status == "OK":
+                        # YOLO OBB/Seg + COCO는 선택 시에만, 라벨 품질을 위해 OK 건만 기록
+                        if status == "OK" and export_yolo_coco:
                             img_export = self.original_image
                             h, w = img_export.shape[:2]
                             yolo_img_name = f"{stem}.jpg"
@@ -1800,7 +2202,9 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 item_json["leaf_count"] = leaf_count
                 item_json["scale_count"] = scale_count
                 item_json["leaf_area_pixels"] = leaf_area_px
+                item_json["leaf_area_cm2"] = round(float(leaf_area_cm2), 6)
                 item_json["scale_area_pixels"] = scale_area_px
+                item_json["scale_area_cm2"] = round(float(scale_area_cm2), 6)
                 item_json["pixels_per_cm2"] = pixels_per_cm2
                 item_json["processing_ms"] = round(processing_ms, 2)
                 item_json["leaf_objects"] = leaf_rows_this
@@ -1816,7 +2220,9 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "leaf_count": leaf_count,
                     "scale_count": scale_count,
                     "leaf_area_pixels": leaf_area_px,
+                    "leaf_area_cm2": round(float(leaf_area_cm2), 6),
                     "scale_area_pixels": scale_area_px,
+                    "scale_area_cm2": round(float(scale_area_cm2), 6),
                     "pixels_per_cm2": pixels_per_cm2 if pixels_per_cm2 is not None else "",
                     "processing_ms": round(processing_ms, 2),
                 }
@@ -1842,6 +2248,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "status": status,
                     "reasons": list(reasons),
                     "mode": analysis_mode,
+                    "save_per_image": bool(save_per_image),
+                    "processing_ms": round(processing_ms, 2),
                     "resize_divisor": float(getattr(self, "_current_resize_divisor", self.settings.get("inference_resize_divisor", 1.0))),
                     "snapshot": review_snapshot,
                     "review_modified": False,
@@ -1880,7 +2288,9 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "leaf_count",
                     "scale_count",
                     "leaf_area_pixels",
+                    "leaf_area_cm2",
                     "scale_area_pixels",
+                    "scale_area_cm2",
                     "pixels_per_cm2",
                     "processing_ms",
                 ],
@@ -1898,9 +2308,13 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                     "object_type",
                     "object_id",
                     "area_pixels",
+                    "area_cm2",
                     "length_pixels",
+                    "length_cm",
                     "width_pixels",
+                    "width_cm",
                     "perimeter_pixels",
+                    "perimeter_cm",
                     "center_x",
                     "center_y",
                     "status",
@@ -1923,7 +2337,9 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                         "leaf_count",
                         "scale_count",
                         "leaf_area_pixels",
+                        "leaf_area_cm2",
                         "scale_area_pixels",
+                        "scale_area_cm2",
                         "pixels_per_cm2",
                         "processing_ms",
                     ],
@@ -1942,14 +2358,16 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
                 "total_images": len(image_paths),
                 "needs_review_count": len(needs_review_rows),
                 "save_per_image": save_per_image,
+                "export_yolo_coco": export_yolo_coco,
                 "items": json_items,
             }
             json.dump(self._json_safe(payload), f, ensure_ascii=False, indent=2)
 
-        # COCO JSON
-        coco_json_path = os.path.join(out_root, "coco", "annotations.json")
-        with open(coco_json_path, "w", encoding="utf-8") as f:
-            json.dump(self._json_safe(coco_data), f, ensure_ascii=False, indent=2)
+        # COCO JSON (옵션 활성 시만)
+        if export_yolo_coco and coco_data is not None:
+            coco_json_path = os.path.join(out_root, "coco", "annotations.json")
+            with open(coco_json_path, "w", encoding="utf-8") as f:
+                json.dump(self._json_safe(coco_data), f, ensure_ascii=False, indent=2)
 
         ok_count = len([r for r in summary_rows if r.get("status") == "OK"])
         review_count = len(needs_review_rows)
@@ -1960,6 +2378,7 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             f"검토필요(NEEDS_REVIEW): {review_count}\n"
             f"분석 모드: {analysis_mode}\n"
             f"이미지별 CSV/JSON: {'ON' if save_per_image else 'OFF'}\n\n"
+            f"YOLO/COCO 내보내기: {'ON' if export_yolo_coco else 'OFF'}\n\n"
             f"배치 리뷰: 이전/다음으로 전체 이미지 탐색 후 '현재 저장' 가능\n"
             f"(저장 위치: 기존 batch_output의 reports/overlays 또는 per_image 덮어쓰기)\n\n"
             f"출력 폴더:\n{out_root}"
@@ -1967,6 +2386,8 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         # 배치 리뷰 세션 활성화 (OK/NEEDS_REVIEW 전체 탐색)
         self.batch_review_items = review_items
         self.batch_review_output_root = out_root
+        self.batch_review_save_per_image = bool(save_per_image)
+        self.batch_review_export_yolo_coco = bool(export_yolo_coco)
         self.batch_review_active = len(review_items) > 0
         self.batch_review_index = 0 if self.batch_review_active else -1
         self._batch_review_last_saved_index = -1

@@ -33,13 +33,9 @@ class GUISetup:
             self.root.geometry("1400x900")
         self._warn_if_ctk_missing()
         
-        # Return/Enter 키가 포커스된 버튼을 활성화하지 않도록 바인딩
-        # 이 바인딩은 messagebox 후 Enter 키 중복 실행 문제를 방지
+        # Return/Enter 키 중복 입력 방지
+        # (messagebox 닫기 직후 Enter 재입력으로 버튼이 연속 실행되는 문제 완화)
         self._block_return_key = False
-        # 버튼 클릭 추적 (이전 클릭 동작 반복 실행 방지)
-        self._button_action_handlers = {}
-        self._widget_action_map = {}
-        self._action_buttons = {}
         def _on_return(event):
             if self._block_return_key:
                 return "break"  # 이벤트 전파 중단
@@ -47,70 +43,20 @@ class GUISetup:
         self.root.bind("<Return>", _on_return)
         self.root.bind("<KP_Enter>", _on_return)  # 숫자패드 Enter
 
-        def _register_action_widgets(widget, action_id):
-            try:
-                self._widget_action_map[widget] = action_id
-                for child in widget.winfo_children():
-                    _register_action_widgets(child, action_id)
-            except Exception:
-                pass
-
-        def _resolve_action_from_widget(widget):
-            try:
-                w = widget
-                while w is not None:
-                    if w in self._widget_action_map:
-                        return self._widget_action_map[w]
-                    w = getattr(w, "master", None)
-            except Exception:
-                pass
-            return None
-
-        def _invoke_action(action_id):
-            handler = getattr(self, "_button_action_handlers", {}).get(action_id)
-            btn = getattr(self, "_action_buttons", {}).get(action_id)
-            state = None
-            try:
-                if btn is not None:
-                    state = btn.cget("state")
-            except Exception:
-                state = None
-            if state in ("disabled", "disable"):
-                return None
-            if handler is None:
-                return None
-            return handler()
-
-        def _on_root_press(event):
-            action_id = _resolve_action_from_widget(getattr(event, "widget", None))
-            if action_id:
-                _invoke_action(action_id)
-                return None
-
-        def _wrap_button_command(action_id, func):
-            # 핸들러 등록 (실제 실행은 press에서)
-            try:
-                self._button_action_handlers[action_id] = func
-            except Exception:
-                pass
-            def _noop():
-                return None
-            return _noop
+        # 버튼은 각 위젯의 native command 경로로 실행한다.
+        # (전역 ButtonPress 훅 기반 라우팅은 macOS 비활성 창 상태에서
+        # 잘못된 위젯 이벤트를 유발해 이전 동작이 재실행될 수 있음)
+        def _wrap_button_command(_action_id, func):
+            return func
 
         self._wrap_button_command = _wrap_button_command
+
         def _make_ctk_button(parent, action_id, **kwargs):
+            _ = action_id
             cmd = kwargs.pop("command", None)
-            if cmd is not None:
-                cmd = self._wrap_button_command(action_id, cmd)
             btn = ctk.CTkButton(parent, command=cmd, **kwargs)
-            try:
-                self._action_buttons[action_id] = btn
-            except Exception:
-                pass
-            _register_action_widgets(btn, action_id)
             return btn
         self._make_ctk_button = _make_ctk_button
-        self.root.bind_all("<ButtonPress-1>", _on_root_press, add="+")
 
         self.setup_layout()
         self.setup_controls()
@@ -175,6 +121,12 @@ class GUISetup:
                 text="배치: 이미지별 CSV/JSON 저장",
                 variable=self.batch_save_per_image_var
             ).pack(anchor="w", padx=8, pady=(0, 4))
+            self.batch_export_yolo_coco_var = tk.BooleanVar(value=False)
+            ctk.CTkCheckBox(
+                file_frame,
+                text="배치: YOLO/COCO 같이 내보내기",
+                variable=self.batch_export_yolo_coco_var
+            ).pack(anchor="w", padx=8, pady=(0, 6))
 
             # 배치 리뷰 네비게이션
             self.batch_review_label = ctk.CTkLabel(
@@ -244,6 +196,7 @@ class GUISetup:
 
             self.seed_mode = ctk.StringVar(value="leaf")
             ctk.CTkRadioButton(seed_frame, text="Leaf (+)", variable=self.seed_mode, value="leaf").pack(anchor="w")
+            ctk.CTkRadioButton(seed_frame, text="Plant (+)", variable=self.seed_mode, value="plant").pack(anchor="w")
             ctk.CTkRadioButton(seed_frame, text="Scale (+)", variable=self.seed_mode, value="scale").pack(anchor="w")
             ctk.CTkRadioButton(seed_frame, text="배경 (-)", variable=self.seed_mode, value="background").pack(anchor="w")
             
@@ -258,7 +211,7 @@ class GUISetup:
             ).pack(pady=(4, 2), fill="x")
             ctk.CTkLabel(
                 seed_frame,
-                text="Leaf/Scale 시드 중 한 종류와 배경(-) 시드를 함께 찍어 보정",
+                text="Leaf/Plant/Scale 중 한 종류와 배경(-) 시드를 함께 찍어 보정",
                 font=("Arial", 10),
                 text_color=("gray35", "gray70")
             ).pack(anchor="w", pady=(0, 4))
@@ -492,15 +445,9 @@ class GUISetup:
             # tkinter 버전 (간소화됨)
             ttk.Label(self.left_frame, text="Leaf Area Analyzer").pack(pady=10)
             def _make_ttk_btn(parent, action_id, **kwargs):
+                _ = action_id
                 cmd = kwargs.pop("command", None)
-                if cmd is not None:
-                    cmd = self._wrap_button_command(action_id, cmd)
                 btn = ttk.Button(parent, command=cmd, **kwargs)
-                try:
-                    self._widget_action_map[btn] = action_id
-                    self._action_buttons[action_id] = btn
-                except Exception:
-                    pass
                 return btn
             _make_ttk_btn(self.left_frame, "load_image", text="이미지 열기", command=self.load_image).pack(pady=5, fill="x")
             _make_ttk_btn(self.left_frame, "batch_process", text="배치 처리", command=self.batch_process).pack(pady=5, fill="x")
@@ -517,12 +464,15 @@ class GUISetup:
             ttk.OptionMenu(self.left_frame, self.batch_analysis_mode_var, "sam3", "sam3", "basic").pack(pady=2, fill="x")
             self.batch_save_per_image_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(self.left_frame, text="배치: 이미지별 CSV/JSON 저장", variable=self.batch_save_per_image_var).pack(pady=(0, 6), anchor="w")
+            self.batch_export_yolo_coco_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(self.left_frame, text="배치: YOLO/COCO 같이 내보내기", variable=self.batch_export_yolo_coco_var).pack(pady=(0, 6), anchor="w")
             self.csv_include_pixels_var = tk.BooleanVar(value=False)
             ttk.Label(self.left_frame, text="SAM3 후보정 포인트").pack(pady=(2, 0), anchor="w")
             self.seed_edit_enabled_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(self.left_frame, text="포인트 입력 모드", variable=self.seed_edit_enabled_var).pack(pady=(0, 2), anchor="w")
             self.seed_mode = tk.StringVar(value="leaf")
             ttk.Radiobutton(self.left_frame, text="Leaf (+)", variable=self.seed_mode, value="leaf").pack(anchor="w")
+            ttk.Radiobutton(self.left_frame, text="Plant (+)", variable=self.seed_mode, value="plant").pack(anchor="w")
             ttk.Radiobutton(self.left_frame, text="Scale (+)", variable=self.seed_mode, value="scale").pack(anchor="w")
             ttk.Radiobutton(self.left_frame, text="배경 (-)", variable=self.seed_mode, value="background").pack(anchor="w")
             _make_ttk_btn(self.left_frame, "clear_current_seeds", text="시드 초기화", command=self.clear_current_seeds).pack(pady=2, fill="x")

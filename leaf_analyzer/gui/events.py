@@ -194,7 +194,7 @@ class EventHandlers:
                         current_mode = "leaf"
                 else:
                     current_mode = "leaf"
-                if current_mode not in {"leaf", "scale", "background"}:
+                if current_mode not in {"leaf", "plant", "scale", "background"}:
                     current_mode = "leaf"
                 self._log(f" 시드 모드: {current_mode}")
 
@@ -265,7 +265,7 @@ class EventHandlers:
             seed_removed = False
             removed_from_class = None
             
-            for seed_class in ["leaf", "scale", "background"]:
+            for seed_class in ["leaf", "plant", "scale", "background"]:
                 if self.seed_manager.remove_seed_at_position(orig_x, orig_y, seed_class, threshold=20):
                     seed_removed = True
                     removed_from_class = seed_class

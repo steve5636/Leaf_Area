@@ -291,6 +291,7 @@ class OverlayManager:
         """시드 마커 추가"""
         colors = {
             "leaf": (0, 255, 0),
+            "plant": (255, 200, 0),
             "scale": (255, 0, 0),
             "background": (0, 128, 255)
         }

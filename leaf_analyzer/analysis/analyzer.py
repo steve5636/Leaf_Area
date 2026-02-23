@@ -252,14 +252,14 @@ Scale 면적: {scale_area_text}
         return message
 
     def _ensure_seed_buckets(self) -> dict:
-        """시드 버킷 키(leaf/scale/background) 존재 보장."""
+        """시드 버킷 키(leaf/plant/scale/background) 존재 보장."""
         if not hasattr(self, "seed_manager") or self.seed_manager is None:
             return {}
         seeds = getattr(self.seed_manager, "seeds", None)
         if not isinstance(seeds, dict):
             seeds = {}
             self.seed_manager.seeds = seeds
-        for key in ("leaf", "scale", "background"):
+        for key in ("leaf", "plant", "scale", "background"):
             if key not in seeds or not isinstance(seeds.get(key), list):
                 seeds[key] = list(seeds.get(key, [])) if isinstance(seeds.get(key, []), (list, tuple)) else []
         return seeds
@@ -382,32 +382,42 @@ Scale 면적: {scale_area_text}
 
         seeds = self._ensure_seed_buckets()
         leaf_pos = list(seeds.get("leaf", []))
+        plant_pos = list(seeds.get("plant", []))
         scale_pos = list(seeds.get("scale", []))
         bg_neg = list(seeds.get("background", []))
 
         has_leaf = len(leaf_pos) > 0
+        has_plant = len(plant_pos) > 0
         has_scale = len(scale_pos) > 0
-        if has_leaf and has_scale:
+        positive_target_count = int(has_leaf) + int(has_plant) + int(has_scale)
+        if positive_target_count > 1:
             self._last_analysis_error = "mixed_target_seeds"
             if show_message:
                 messagebox.showwarning(
                     "후보정",
-                    "Leaf와 Scale 양쪽 시드가 동시에 있습니다.\n한 대상만 남기고 다시 시도하세요."
+                    "Leaf/Plant/Scale 시드가 동시에 있습니다.\n한 대상만 남기고 다시 시도하세요."
                 )
                 self._safe_refocus()
             return False
-        if (not has_leaf) and (not has_scale):
+        if positive_target_count == 0:
             self._last_analysis_error = "missing_positive_seed"
             if show_message:
                 messagebox.showwarning(
                     "후보정",
-                    "누락 객체를 추가하려면 Leaf 또는 Scale 시드를 1개 이상 찍어주세요."
+                    "누락 객체를 추가하려면 Leaf/Plant/Scale 시드를 1개 이상 찍어주세요."
                 )
                 self._safe_refocus()
             return False
 
-        target = "leaf" if has_leaf else "scale"
-        positive_points = leaf_pos if target == "leaf" else scale_pos
+        if has_leaf:
+            target = "leaf"
+            positive_points = leaf_pos
+        elif has_plant:
+            target = "plant"
+            positive_points = plant_pos
+        else:
+            target = "scale"
+            positive_points = scale_pos
 
         try:
             score_var = getattr(self, "sam3_score_threshold_var", None)
@@ -422,6 +432,8 @@ Scale 면적: {scale_area_text}
         if target == "leaf":
             prompt_var = getattr(self, "sam3_prompt_var", None)
             prompt = prompt_var.get() if prompt_var else "leaf"
+        elif target == "plant":
+            prompt = "plant"
         else:
             scale_color = getattr(self, "scale_color_var", None)
             scale_mode = scale_color.get() if scale_color else "red"
@@ -483,25 +495,60 @@ Scale 면적: {scale_area_text}
                 self._safe_refocus()
             return False
 
-        if target == "leaf":
+        if target in {"leaf", "plant"}:
             if self._current_instance_labels is not None and self._current_instance_labels.shape[:2] == (h, w):
-                existing_mask = self._current_instance_labels > 0
                 labels_map = self._current_instance_labels.astype(np.int32).copy()
+                existing_mask = None
+                try:
+                    # 삭제된 객체를 제외한 "활성" Leaf 마스크를 기존 영역으로 간주
+                    existing_mask = self._create_filtered_mask()
+                except Exception:
+                    existing_mask = None
+                if existing_mask is None or existing_mask.shape[:2] != (h, w):
+                    existing_mask = labels_map > 0
             else:
-                base_leaf_mask = np.asarray(self.analysis_results.get("leaf_mask")).astype(bool) if self.analysis_results.get("leaf_mask") is not None else np.zeros((h, w), dtype=bool)
+                base_leaf_mask = (
+                    np.asarray(self.analysis_results.get("leaf_mask")).astype(bool)
+                    if self.analysis_results.get("leaf_mask") is not None
+                    else np.zeros((h, w), dtype=bool)
+                )
                 _, labels_map = cv2.connectedComponents(base_leaf_mask.astype(np.uint8), connectivity=8)
                 labels_map = labels_map.astype(np.int32)
                 existing_mask = labels_map > 0
+                # 삭제 ID가 있으면 기존 영역에서 제외해 후보정이 가능하도록 함
+                try:
+                    deleted_ids = getattr(self, "_deleted_objects", set())
+                    if deleted_ids:
+                        existing_mask = existing_mask & (~np.isin(labels_map, np.array(sorted(deleted_ids), dtype=np.int32)))
+                except Exception:
+                    pass
             min_new_pixels = max(25, int(self.settings.get("min_object_area", 1000) * 0.15))
         else:
             if self._current_scale_labels is not None and self._current_scale_labels.shape[:2] == (h, w):
-                existing_mask = self._current_scale_labels > 0
                 labels_map = self._current_scale_labels.astype(np.int32).copy()
+                existing_mask = None
+                try:
+                    # 삭제된 Scale 제외 활성 마스크 기준으로 신규 영역 판단
+                    existing_mask = self._create_filtered_scale_mask()
+                except Exception:
+                    existing_mask = None
+                if existing_mask is None or existing_mask.shape[:2] != (h, w):
+                    existing_mask = labels_map > 0
             else:
-                base_scale_mask = np.asarray(self.analysis_results.get("scale_mask")).astype(bool) if self.analysis_results.get("scale_mask") is not None else np.zeros((h, w), dtype=bool)
+                base_scale_mask = (
+                    np.asarray(self.analysis_results.get("scale_mask")).astype(bool)
+                    if self.analysis_results.get("scale_mask") is not None
+                    else np.zeros((h, w), dtype=bool)
+                )
                 _, labels_map = cv2.connectedComponents(base_scale_mask.astype(np.uint8), connectivity=8)
                 labels_map = labels_map.astype(np.int32)
                 existing_mask = labels_map > 0
+                try:
+                    deleted_ids = getattr(self, "_deleted_scale_objects", set())
+                    if deleted_ids:
+                        existing_mask = existing_mask & (~np.isin(labels_map, np.array(sorted(deleted_ids), dtype=np.int32)))
+                except Exception:
+                    pass
             min_new_pixels = max(15, int(self.settings.get("min_object_area", 1000) * 0.05))
 
         picked = self._pick_correction_candidate(
@@ -517,7 +564,7 @@ Scale 면적: {scale_area_text}
                 messagebox.showwarning(
                     "후보정",
                     "시드 위치를 포함하는 신규 객체를 찾지 못했습니다.\n"
-                    "• 누락 객체 내부에 Leaf/Scale 시드를 찍고\n"
+                    "• 누락 객체 내부에 Leaf/Plant/Scale 시드를 찍고\n"
                     "• 필요하면 배경(-) 시드를 더 추가해 다시 시도하세요."
                 )
                 self._safe_refocus()
@@ -527,11 +574,12 @@ Scale 면적: {scale_area_text}
         new_id = int(labels_map.max()) + 1
         labels_map[new_mask] = new_id
 
-        if target == "leaf":
+        if target in {"leaf", "plant"}:
             self._current_instance_labels = labels_map
             new_obj = MorphologicalAnalyzer.analyze_mask_with_holes(new_mask)
             new_obj["id"] = new_id
             new_obj["score"] = float(picked["score"])
+            new_obj["prompt_target"] = target
             objects = self.analysis_results.get("objects", [])
             if not isinstance(objects, list):
                 objects = []
@@ -554,6 +602,7 @@ Scale 면적: {scale_area_text}
 
         # 후보정 완료 후 시드 정리
         seeds["leaf"] = []
+        seeds["plant"] = []
         seeds["scale"] = []
         seeds["background"] = []
         try:
@@ -564,7 +613,12 @@ Scale 면적: {scale_area_text}
             pass
 
         if show_message:
-            title = "Leaf 추가 완료" if target == "leaf" else "Scale 추가 완료"
+            if target == "leaf":
+                title = "Leaf 추가 완료"
+            elif target == "plant":
+                title = "Plant 추가 완료"
+            else:
+                title = "Scale 추가 완료"
             messagebox.showinfo(
                 title,
                 f"SAM3 후보정으로 {target} 객체 1개를 추가했습니다.\n"

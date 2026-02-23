@@ -12,7 +12,7 @@ class SeedManager:
     """시드 관리 클래스"""
     
     def __init__(self):
-        self.seeds = {"leaf": [], "scale": []}  # background 제거
+        self.seeds = {"leaf": [], "plant": [], "scale": [], "background": []}
         self.current_class = "leaf"
         
     def add_seed(self, x: int, y: int, seed_class: str = None):

@@ -745,11 +745,14 @@ class ParameterEstimator:
             self.settings["morphology_kernel_size"] = v
         morph_kernel_slider.configure(command=update_morph_kernel_label)
         
-        # 저장/취소 버튼
+        # 저장/미리보기/취소 버튼
         button_frame = ctk.CTkFrame(content)
         button_frame.pack(pady=20)
-        
-        def save_params():
+
+        preview_status_label = ctk.CTkLabel(button_frame, text="", font=("Arial", 10), text_color=("gray35", "gray70"))
+        preview_status_label.pack(fill="x", padx=5, pady=(0, 4))
+
+        def apply_current_ui_params(set_manual_flag: bool = False):
             self.easy_params["minG"] = int(minG_var.get())
             self.easy_params["ratG"] = float(ratG_var.get())
             self.easy_params["ratGb"] = float(ratGb_var.get())
@@ -763,15 +766,46 @@ class ParameterEstimator:
                 self.settings["morphology_kernel_size"] = mk
             except Exception:
                 pass
-            
-            # 수동 조정 플래그 설정 (자동 파라미터 추정 비활성화)
-            self._user_manually_adjusted_params = True
-            
-            # 레이블 업데이트
+            if set_manual_flag:
+                # 수동 조정 플래그 설정 (자동 파라미터 추정 비활성화)
+                self._user_manually_adjusted_params = True
             if hasattr(self, 'easy_params_label'):
                 self.easy_params_label.configure(
                     text=f"G>{self.easy_params['minG']}, G/R>{self.easy_params['ratG']:.2f}, G/B>{self.easy_params['ratGb']:.2f}"
                 )
+
+        def preview_params():
+            apply_current_ui_params(set_manual_flag=False)
+            if self.original_image is None:
+                messagebox.showinfo("안내", "먼저 이미지를 로드해주세요.")
+                self._safe_refocus()
+                return
+
+            old_manual_flag = bool(getattr(self, "_user_manually_adjusted_params", False))
+            try:
+                preview_status_label.configure(text="미리보기 실행 중...")
+                param_window.update_idletasks()
+
+                # 미리보기는 현재 슬라이더 값을 즉시 적용하되,
+                # 저장하지 않은 상태에서는 자동 추정 모드 플래그를 유지한다.
+                self._user_manually_adjusted_params = True
+                ok = bool(self.basic_analyze(show_message=False, show_overlay=True))
+                if ok:
+                    preview_status_label.configure(text="미리보기 완료 (현재 슬라이더 값)")
+                else:
+                    preview_status_label.configure(text="미리보기 실패: 로그를 확인하세요")
+            except Exception:
+                preview_status_label.configure(text="미리보기 실패: 로그를 확인하세요")
+            finally:
+                self._user_manually_adjusted_params = old_manual_flag
+                try:
+                    param_window.lift()
+                    param_window.focus_set()
+                except Exception:
+                    pass
+        
+        def save_params():
+            apply_current_ui_params(set_manual_flag=True)
             
             param_window.destroy()
             self._safe_refocus()
@@ -782,5 +816,6 @@ class ParameterEstimator:
             param_window.destroy()
             self._safe_refocus()
         
+        ctk.CTkButton(button_frame, text="미리보기", command=preview_params).pack(side="left", padx=5)
         ctk.CTkButton(button_frame, text="저장", command=save_params).pack(side="left", padx=5)
         ctk.CTkButton(button_frame, text="취소", command=close_window).pack(side="left", padx=5)
