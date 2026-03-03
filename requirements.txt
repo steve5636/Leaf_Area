@@ -1,5 +1,10 @@
 # Requires Python >=3.12,<3.13
-numpy
+# NOTE:
+# - CUDA GPU 사용자는 torch/torchvision을 SAM3 공식 가이드 기준으로 먼저 설치하세요.
+# - 참조: https://github.com/facebookresearch/sam3
+# - 이 레포의 sam3 소스를 editable 모드로 함께 설치합니다.
+-e ./sam3
+numpy==1.26
 opencv-python
 scipy
 scikit-image

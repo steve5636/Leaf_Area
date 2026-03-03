@@ -47,17 +47,29 @@ class Sam3Segmenter:
         torch, build_sam3_image_model, Sam3Processor = self._lazy_import()
         self._torch = torch
         requested = self.device.lower() if isinstance(self.device, str) else None
+        cuda_available = torch.cuda.is_available()
         mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        if requested in (None, "", "mps"):
-            if mps_available:
+        if requested in (None, "", "auto"):
+            if cuda_available:
+                self.device = "cuda"
+            elif mps_available:
                 self.device = "mps"
             else:
-                if requested == "mps":
-                    self.device = "cpu"
-                else:
-                    self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                self.device = "cpu"
         elif requested == "cuda":
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if cuda_available:
+                self.device = "cuda"
+            elif mps_available:
+                self.device = "mps"
+            else:
+                self.device = "cpu"
+        elif requested == "mps":
+            if mps_available:
+                self.device = "mps"
+            elif cuda_available:
+                self.device = "cuda"
+            else:
+                self.device = "cpu"
         else:
             self.device = requested
         if self.device == "mps":
