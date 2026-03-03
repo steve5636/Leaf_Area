@@ -71,8 +71,34 @@ class EventHandlers:
         self._log(f"캔버스 클릭 이벤트 발생: ({event.x}, {event.y})")
         
         try:
+            # SAM3 포인트 입력 모드 여부를 먼저 확인
+            seed_edit_enabled = False
+            try:
+                if hasattr(self, "seed_edit_enabled_var"):
+                    seed_edit_enabled = bool(self.seed_edit_enabled_var.get())
+            except Exception:
+                seed_edit_enabled = False
+
+            # 포인트 입력 모드가 켜진 경우 객체 편집 모드(삭제/병합/분리)와의 충돌 방지
+            if seed_edit_enabled and (
+                getattr(self, 'delete_mode_enabled', False)
+                or getattr(self, 'merge_mode_enabled', False)
+                or getattr(self, 'split_mode_enabled', False)
+            ):
+                self.delete_mode_enabled = False
+                self.delete_selected = set()
+                self.merge_mode_enabled = False
+                self.merge_selected = set()
+                self._merge_snapshot = None
+                self.split_mode_enabled = False
+                self.split_mode_points = []
+                self.split_selected_object = None
+                self._split_snapshot = None
+                if hasattr(self, "_split_preview"):
+                    delattr(self, "_split_preview")
+
             # --- 삭제 모드 라우팅 ---
-            if getattr(self, 'delete_mode_enabled', False):
+            if (not seed_edit_enabled) and getattr(self, 'delete_mode_enabled', False):
                 if not self.analysis_results:
                     messagebox.showwarning("경고", "먼저 분석을 실행하세요.")
                     self._safe_refocus()
@@ -96,7 +122,7 @@ class EventHandlers:
                 self.show_result_overlay()
                 return
             # --- 병합 모드 라우팅 ---
-            if getattr(self, 'merge_mode_enabled', False):
+            if (not seed_edit_enabled) and getattr(self, 'merge_mode_enabled', False):
                 if not self.analysis_results:
                     messagebox.showwarning("경고", "먼저 분석을 실행하세요.")
                     self._safe_refocus()
@@ -128,7 +154,7 @@ class EventHandlers:
                 self._preview_merge_result()
                 return
             # --- 분리 모드 라우팅 ---
-            if getattr(self, 'split_mode_enabled', False):
+            if (not seed_edit_enabled) and getattr(self, 'split_mode_enabled', False):
                 if not self.analysis_results:
                     messagebox.showwarning("경고", "먼저 분석을 실행하세요.")
                     self._safe_refocus()
@@ -176,12 +202,6 @@ class EventHandlers:
             h, w = self.original_image.shape[:2]
             if 0 <= orig_x < w and 0 <= orig_y < h:
                 # 포인트 입력 모드가 꺼져 있으면 클릭 무시 (오버레이 유지)
-                seed_edit_enabled = False
-                try:
-                    if hasattr(self, "seed_edit_enabled_var"):
-                        seed_edit_enabled = bool(self.seed_edit_enabled_var.get())
-                except Exception:
-                    seed_edit_enabled = False
                 if not seed_edit_enabled:
                     self._log("포인트 입력 모드 비활성화 - 클릭 무시")
                     return
@@ -315,33 +335,17 @@ class EventHandlers:
                 else:  # "scale"
                     deleted_set = self._deleted_scale_objects
                     type_name = "Scale"
-                    
-                    # Scale은 1개만 유지: 선택한 Scale 외 모두 삭제 처리, 선택한 것은 항상 유지
-                    if self._current_scale_labels is not None:
-                        unique_scale_ids = np.unique(self._current_scale_labels)
-                        # 새 삭제 집합: 선택된 ID를 제외한 모든 ID
-                        self._deleted_scale_objects = set(int(sid) for sid in unique_scale_ids if sid > 0 and sid != object_id)
-                        # 선택된 ID는 삭제 집합에서 제거 보장
-                        if object_id in self._deleted_scale_objects:
-                            self._deleted_scale_objects.discard(object_id)
-                        print(f"Scale 단일 선택 모드: 선택 #{object_id} 유지, 나머지 {len(self._deleted_scale_objects)}개 삭제 표시")
-                    
-                    # Scale 클릭의 액션 표기는 '선택'으로 통일
-                    action = "선택"
-                    
-                    # 메시지 표기를 위해 이후 분기 공통변수 세팅만 유지하고 토글은 수행하지 않음
-                    
-                if object_type != "scale":
-                    if object_id in deleted_set:
-                        # 이미 삭제된 객체를 다시 클릭하면 복원
-                        deleted_set.remove(object_id)
-                        action = "복원"
-                        print(f"{type_name} 객체 {object_id} 복원")
-                    else:
-                        # 새로운 객체 삭제
-                        deleted_set.add(object_id)
-                        action = "삭제"
-                        print(f"{type_name} 객체 {object_id} 삭제")
+
+                if object_id in deleted_set:
+                    # 이미 삭제된 객체를 다시 클릭하면 복원
+                    deleted_set.remove(object_id)
+                    action = "복원"
+                    print(f"{type_name} 객체 {object_id} 복원")
+                else:
+                    # 새로운 객체 삭제
+                    deleted_set.add(object_id)
+                    action = "삭제"
+                    print(f"{type_name} 객체 {object_id} 삭제")
                 
                 # 사용자에게 피드백
                 # 현재 활성 표시 개수 계산
@@ -363,7 +367,7 @@ class EventHandlers:
                         active_scale = len([sid for sid in np.unique(self._current_scale_labels) if sid > 0 and sid not in self._deleted_scale_objects])
                 total_deleted = len(self._deleted_objects) + len(self._deleted_scale_objects)
                 messagebox.showinfo(
-                    "객체 선택",
+                    "객체 삭제/복원",
                     f"{type_name} 객체 #{object_id}가 {action}되었습니다.\n\n"
                     f"현재 표시중: Leaf {active_leaf}개, Scale {active_scale}개\n"
                     f"현재 삭제된 객체: Leaf {len(self._deleted_objects)}개, Scale {len(self._deleted_scale_objects)}개\n"

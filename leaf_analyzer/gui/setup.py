@@ -143,7 +143,7 @@ class GUISetup:
             )
             self.batch_review_prev_btn.pack(side="left", padx=2)
             self.batch_review_save_btn = self._make_ctk_button(
-                review_row, "batch_review_save_current", text="현재 저장", width=90, command=self.batch_review_save_current
+                review_row, "batch_review_save_current", text="누적 저장", width=90, command=self.batch_review_save_current
             )
             self.batch_review_save_btn.pack(side="left", padx=2)
             self.batch_review_next_btn = self._make_ctk_button(
@@ -484,7 +484,7 @@ class GUISetup:
             review_row.pack(fill="x", pady=(0, 6))
             self.batch_review_prev_btn = _make_ttk_btn(review_row, "batch_review_prev", text="이전", command=self.batch_review_prev)
             self.batch_review_prev_btn.pack(side="left", padx=2)
-            self.batch_review_save_btn = _make_ttk_btn(review_row, "batch_review_save_current", text="현재 저장", command=self.batch_review_save_current)
+            self.batch_review_save_btn = _make_ttk_btn(review_row, "batch_review_save_current", text="누적 저장", command=self.batch_review_save_current)
             self.batch_review_save_btn.pack(side="left", padx=2)
             self.batch_review_next_btn = _make_ttk_btn(review_row, "batch_review_next", text="다음", command=self.batch_review_next)
             self.batch_review_next_btn.pack(side="left", padx=2)

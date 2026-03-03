@@ -1061,6 +1061,45 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             pass
         return snap
 
+    def _snapshot_value_equal(self, a: Any, b: Any) -> bool:
+        """리뷰 snapshot 동등성 비교 (numpy/중첩 구조 지원)."""
+        try:
+            if a is b:
+                return True
+
+            if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+                if not isinstance(a, np.ndarray) or not isinstance(b, np.ndarray):
+                    return False
+                return bool(np.array_equal(a, b))
+
+            if isinstance(a, np.generic):
+                a = a.item()
+            if isinstance(b, np.generic):
+                b = b.item()
+
+            if isinstance(a, dict) and isinstance(b, dict):
+                if set(a.keys()) != set(b.keys()):
+                    return False
+                for k in a.keys():
+                    if not self._snapshot_value_equal(a.get(k), b.get(k)):
+                        return False
+                return True
+
+            if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+                if len(a) != len(b):
+                    return False
+                for va, vb in zip(a, b):
+                    if not self._snapshot_value_equal(va, vb):
+                        return False
+                return True
+
+            if isinstance(a, set) and isinstance(b, set):
+                return a == b
+
+            return a == b
+        except Exception:
+            return False
+
     def _batch_review_store_current(self):
         if not getattr(self, "batch_review_active", False):
             return
@@ -1069,8 +1108,11 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         if idx < 0 or idx >= len(items):
             return
         item = items[idx]
-        item["snapshot"] = self._capture_current_review_snapshot()
-        item["review_modified"] = True
+        prev_snapshot = item.get("snapshot", None)
+        new_snapshot = self._capture_current_review_snapshot()
+        changed = not self._snapshot_value_equal(prev_snapshot, new_snapshot)
+        item["snapshot"] = new_snapshot
+        item["review_modified"] = bool(item.get("review_modified", False)) or bool(changed)
         # 간단 상태 갱신
         snap = item.get("snapshot", {})
         ar = snap.get("analysis_results", None) if isinstance(snap, dict) else None
@@ -1183,16 +1225,21 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             messagebox.showinfo("배치 리뷰", "활성화된 배치 리뷰 세션이 없습니다.")
             self._safe_refocus()
             return
-        self._batch_review_store_current()
         try:
-            self._save_current_review_item_to_disk()
+            saved_count = self._save_all_review_items_to_disk(only_modified=True)
         except Exception as e:
             messagebox.showerror("배치 리뷰", f"현재 저장 중 오류가 발생했습니다:\n{e}")
             self._safe_refocus()
             return
-        self._batch_review_last_saved_index = int(getattr(self, "batch_review_index", -1))
         self._update_batch_review_ui()
-        messagebox.showinfo("배치 리뷰", "현재 이미지 수정 결과를 배치 리뷰 세션에 저장했습니다.")
+        if int(saved_count) <= 0:
+            messagebox.showinfo("배치 리뷰", "저장할 수정 사항이 없습니다.")
+        else:
+            messagebox.showinfo(
+                "배치 리뷰",
+                f"수정 누적 저장 완료: {int(saved_count)}개 이미지 반영\n"
+                "통합 리포트(batch_summary/batch_objects/batch_results)도 갱신했습니다.",
+            )
         self._safe_refocus()
 
     def _extract_review_item_export_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1547,7 +1594,55 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
         with open(batch_json_path, "w", encoding="utf-8") as f:
             json.dump(self._json_safe(payload), f, ensure_ascii=False, indent=2)
 
-    def _save_current_review_item_to_disk(self):
+    def _save_all_review_items_to_disk(self, only_modified: bool = True) -> int:
+        """배치 리뷰에서 누적된 수정사항을 한 번에 저장."""
+        if not getattr(self, "batch_review_active", False):
+            return 0
+
+        items = getattr(self, "batch_review_items", [])
+        if not isinstance(items, list) or len(items) == 0:
+            return 0
+
+        current_idx = int(getattr(self, "batch_review_index", -1))
+        if current_idx < 0 or current_idx >= len(items):
+            return 0
+
+        # 현재 화면의 최신 편집 상태를 먼저 스냅샷에 반영
+        self._batch_review_store_current()
+
+        if only_modified:
+            targets = [
+                i for i, it in enumerate(items)
+                if bool(it.get("review_modified", False))
+            ]
+        else:
+            targets = list(range(len(items)))
+
+        if not targets:
+            return 0
+
+        saved = 0
+        for i in targets:
+            self._batch_review_load_index(i)
+            if int(getattr(self, "batch_review_index", -1)) != int(i):
+                continue
+            self._batch_review_store_current()
+            self._save_current_review_item_to_disk(rewrite_reports=False)
+            try:
+                items[i]["review_modified"] = False
+            except Exception:
+                pass
+            saved += 1
+
+        # 통합 리포트는 마지막에 한 번만 갱신
+        self._rewrite_batch_reports_from_review_items()
+
+        # 사용자 작업 컨텍스트 복원
+        self._batch_review_load_index(current_idx)
+        self._batch_review_last_saved_index = int(getattr(self, "batch_review_index", -1))
+        return int(saved)
+
+    def _save_current_review_item_to_disk(self, rewrite_reports: bool = True):
         out_root = getattr(self, "batch_review_output_root", None)
         if not out_root:
             return
@@ -1673,10 +1768,11 @@ class AdvancedLeafAnalyzer(GUISetup, EventHandlers, LeafAnalyzer, ImageProcessor
             pass
 
         # 통합 리포트 갱신 (batch_summary/batch_objects/batch_results)
-        try:
-            self._rewrite_batch_reports_from_review_items()
-        except Exception:
-            pass
+        if rewrite_reports:
+            try:
+                self._rewrite_batch_reports_from_review_items()
+            except Exception:
+                pass
 
     def batch_process(self):
         """선택한 폴더의 이미지 파일 전체를 배치 분석하고 통합 결과를 내보낸다."""

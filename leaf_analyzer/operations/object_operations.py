@@ -170,8 +170,14 @@ class ObjectOperations:
                     self._deleted_scale_objects.add(int(obj_id))
                     scale_added += 1
         self.delete_selected = set()
+        # 삭제 적용 후 삭제 모드를 종료하여 포인트 입력 모드와 충돌 방지
+        self.delete_mode_enabled = False
         self.refresh_display_with_deletions()
-        messagebox.showinfo("삭제 완료", f"삭제됨: Leaf {leaf_added}개, Scale {scale_added}개\nCtrl+클릭으로 복원 가능합니다.")
+        messagebox.showinfo(
+            "삭제 완료",
+            f"삭제됨: Leaf {leaf_added}개, Scale {scale_added}개\n"
+            "삭제 모드를 종료했습니다. Ctrl+클릭으로 복원 가능합니다."
+        )
         self._safe_refocus()
 
     def delete_clear(self):
@@ -554,4 +560,3 @@ class ObjectOperations:
         filtered_scale_mask = np.isin(labels, keep_ids)
         print(f"_create_filtered_scale_mask: {int(keep_ids.size)}개 활성 Scale 객체, {int(filtered_scale_mask.sum())}픽셀 생성")
         return filtered_scale_mask
-
